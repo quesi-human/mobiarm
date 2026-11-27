@@ -80,11 +80,10 @@ Ubuntu 22.04 / ROS 2 Humble / TurtleBot3 Waffle Pi + LDS-03
 7. 미션 흐름
 
   파이 bringup → 자기 몸체 필터 → 파이 Nav2 → 노트북 RViz
-  → 홈 부근 초기 추정 → 팔 실제 접힘 검사 → 정지 라이다 위치 갱신
-  → YAML homepoint로 실제 이동·정렬 → 작업대 이동
+  → YAML 초기 좌표 설정 → 팔 실제 접힘 검사 → 작업대 이동
   → 접근 footprint 확인 → 10cm 전진 → pick·carry 확인
   → 측정된 전진 거리만큼 후진 → 이동 footprint 복원 → 귀환 → place
-  → IDLE 대기 → 다음 명령(명령마다 홈 정렬을 다시 수행).
+  → IDLE 대기 → 다음 명령.
 
   실험 설정 check_pick_position: false는 작업대 위치 추가 검사만 생략한다.
   Nav2 성공·정지·yaw·충돌 검사와 귀환 위치 검사는 유지한다.
@@ -116,22 +115,20 @@ Ubuntu 22.04 / ROS 2 Humble / TurtleBot3 Waffle Pi + LDS-03
   재설치 시 새 설치 경로의 기존 calibration/state는 덮어쓰지 않는다.
   변경된 코드는 새 설치 경로 backups/<시각>에 먼저 보관한다.
 
-10. 반복 작업 세션과 홈 정렬(2026-11-27)
+10. 반복 작업 세션(2026-11-27)
 
   기본값은 연속 명령 모드이다. 첫 작업은 CLI의 --start/--destination/--color를 사용한다.
-  완료하면 같은 bringup/Nav2/RViz/SSH 세션을 유지하고 다음 출발·귀환점/목적지/색상을 묻는다.
+  완료하면 같은 bringup/Nav2/RViz/SSH 세션을 유지하고 다음 작업 옵션을 한 줄로 받는다.
+  예: --start homepoint --destination workbench --color red
+  생략한 옵션은 최초 실행 옵션을 사용한다(최초 기본값: current/workbench/red).
+  실행 중 지점·색상·yaw를 개별 질문하지 않으며, 미등록 좌표는 실행 전에 오류로 안내한다.
   q, quit, exit, 종료 또는 Ctrl+C로 세션을 종료하고 소유 프로세스를 정리한다.
   한 번만 실행하려면 --once를 추가한다. --setup-only는 기존 기동 유지 전용 모드이다.
 
-  매 작업 시작 시 팔 접힘 확인 → 정지 상태 AMCL 위치 갱신 3회
-  → homepoint Nav2 이동 → 다시 AMCL 갱신 → 위치 4cm/방향 0.05rad 이내 검사
-  → 작업대 이동/집기/귀환/내려놓기 순서로 진행한다.
-  homepoint는 controller/waypoints.yaml에서 읽는다(현재 x=0,y=0,yaw=0).
-  Nav2 홈 전용 goal checker는 3cm/0.04rad를 사용하고 최종 검사는 4cm/0.05rad이다.
-  정밀도는 map/AMCL 추정값 기준이며 실제 바닥 위치의 절대 정밀도를 보증하지 않는다.
-  위치 추정 불확실성·정렬 실패·충돌·집기 실패 시에는 다음 작업을 자동 시작하지 않는다.
-  초기 위치 추정은 한 번만 전송하고, 홈 위치로 반복 재설정하여 보정값을 덮지 않는다.
-  start=current는 홈 정렬이 끝난 실제 추정 위치를 귀환점으로 저장한다.
+  매 작업 시작 시 최신 map TF·팔 접힘·정지 확인 후 바로 작업대로 이동한다.
+  별도 정지 라이다 보정, AMCL 불확실성 검사, homepoint 선행 이동·정렬은 수행하지 않는다.
+  최초 YAML 초기 좌표 전송과 Nav2의 기본 AMCL 위치 추정은 유지한다.
+  start=current는 작업 시작 당시 추정 위치를 귀환점으로 저장한다.
   --start homepoint 등 이름을 지정하면 기존처럼 해당 지점이 귀환점이다.
   대기 중 YAML을 수정했다면 적용을 위해 실행기를 재시작한다.
 
@@ -146,3 +143,22 @@ Git 구성 수정(2026-11-27):
   소스 코드와 calibration은 상위 저장소가 직접 추적한다.
   state, __pycache__, steps/logs, mission_control/runs는 Git에서 제외한다.
   이전 내부 Git 이력은 Desktop의 pjt_soarm_turtlebot_git_backup_20261127_104225/soarm.git에 보관했다.
+
+11. 집기 후 자동 후진 복구
+
+  기본 Nav2 후진이 실패하면 취소·정지 확인 후 오도메트리로 진행 거리를 검사한다.
+  목표 거리 미달 시 5cm씩 최대 3회 추가 후진한다(속도 0.03m/s).
+  추가 후진에만 Nav2 코스트맵 충돌 검사를 우회한다. 자동 전진/주행은 기존 검사를 유지한다.
+  오도메트리 갱신 중단, 2초간 진전 없음, 방향·옆밀림 오차 시 정지·작업 보류한다.
+  최종 실패 시 아래 실패 정리 절차를 수행한 뒤 세션을 종료한다.
+
+12. 동작 실패 정리
+
+  이동·집기·내려놓기 등의 최종 실패 시 베이스와 기존 팔 프로세스를 정지한다.
+  arm lock 획득 → 저장된 park 자세 복귀·실제 관절 확인 → 그리퍼 45% 개방
+  → 블록 보유 상태 초기화 → 팔·그리퍼 전체 토크 OFF 확인 → park 상태 저장
+  → 프로세스 및 bringup/Nav2/RViz/SSH 종료 순서로 정리한다.
+  블록 보유 여부와 무관하게 park 자세에서 해제한다. 정상 완료 시 연속 명령 대기는 유지한다.
+  복구 이동/통신/토크 해제 확인 실패는 arm_recovery_failed로 기록하고 종료한다.
+  park 확인 실패 시 펼쳐진 팔의 강제 토크 OFF를 수행하지 않는다.
+  Ctrl+C·제어 연결 강제 종료는 정지 경로이며 새 복구 이동을 시작하지 않는다.

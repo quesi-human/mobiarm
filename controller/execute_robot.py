@@ -200,13 +200,9 @@ def local_metadata(args):
                 if observation.get('data_type', 'LaserScan') == 'LaserScan':
                     observation['topic'] = '/scan_filtered'
     controller = parameters['controller_server']['ros__parameters']
-    controller['home_goal_checker'] = {'plugin':'nav2_controller::SimpleGoalChecker',
-        'stateful':True, 'xy_goal_tolerance':.12, 'yaw_goal_tolerance':.15}
-    if 'home_goal_checker' not in controller.setdefault('goal_checker_plugins', ['general_goal_checker']):
-        controller['goal_checker_plugins'].append('home_goal_checker')
     for name in controller.get('goal_checker_plugins', ['general_goal_checker']):
         checker = controller.get(name)
-        if isinstance(checker, dict) and name != 'home_goal_checker':
+        if isinstance(checker, dict):
             for key in ('xy_goal_tolerance', 'yaw_goal_tolerance'):
                 checker[key] = min(float(checker.get(key, .1)), .1)
     return mapping, image, parameters, rviz, points
@@ -226,7 +222,6 @@ def deploy(args, ssh, metadata, session):
                Path(__file__).with_name('scan_self_filter.py').read_bytes())
     ssh.upload(directory / 'onboard_navigation.launch.py',
                Path(__file__).with_name('onboard_navigation.launch.py').read_bytes())
-    ssh.upload(directory / 'home_alignment.xml', Path(__file__).with_name('home_alignment.xml').read_bytes())
     ssh.upload(directory / 'navigation.xml', Path(__file__).with_name('navigation.xml').read_bytes())
     ssh.upload(directory / 'map.pgm', image.read_bytes())
     ssh.upload(directory / 'map.yaml', yaml.safe_dump(dict(mapping, image='map.pgm')).encode())
@@ -244,8 +239,6 @@ def deploy(args, ssh, metadata, session):
                                 .get('check_pick_position', False),
         'scan_filter': str(directory / 'scan_self_filter.py'),
         'initial_pose': None if args.manual_initial_pose else validate_point(points[args.initial_waypoint]),
-        'home_pose': validate_point(points.get('homepoint')),
-        'home_behavior_tree': str(directory/'home_alignment.xml'),
         'normal_behavior_tree': str(directory/'navigation.xml'),
         'once': getattr(args, 'once', False),
         'navigation_launch': str(directory / 'onboard_navigation.launch.py')}
@@ -303,16 +296,16 @@ def terminal_input(prompt, check):
             return value
 
 
-def collect_request(args, points, ask):
+def collect_request(args, points, ask=None):
     aliases = {'빨강': 'red', '빨간': 'red', '빨간색': 'red', '노랑': 'yellow',
         '노란': 'yellow', '노란색': 'yellow', '파랑': 'blue', '파란색': 'blue',
         '초록': 'green', '초록색': 'green', '주황': 'orange', '주황색': 'orange',
         '보라': 'purple', '보라색': 'purple'}
     print('등록 지점: ' + ', '.join(points) + ' / current = 현재 위치를 귀환점으로 기록')
     print('색상: red(빨강), yellow(노랑), blue(파랑), green(초록), orange(주황), purple(보라)')
-    start = args.start or ask('출발·귀환 지점 [current]: ') or 'current'
-    destination = args.destination or ask('집기 목적지 [workbench]: ') or 'workbench'
-    color = args.color or ask('집을 블록 색상 [red]: ') or 'red'
+    start = args.start or 'current'
+    destination = args.destination or 'workbench'
+    color = args.color or 'red'
     color = aliases.get(color.strip().lower(), color.strip().lower())
     if color not in COLORS:
         raise ValueError('색상: ' + ', '.join(sorted(COLORS)))
@@ -323,8 +316,7 @@ def collect_request(args, points, ask):
         data = dict(points[name])
         for key in ('x', 'y', 'yaw'):
             if data.get(key) is None:
-                unit = 'rad' if key == 'yaw' else 'm'
-                data[key] = float(ask(f'{name}.{key} 미등록 — 측정값({unit}): '))
+                raise ValueError(f'{name}.{key} 미등록: waypoints.yaml에 좌표·방향을 먼저 저장하세요.')
         return validate_point(data)
 
     request = {'start_name': start, 'destination_name': destination,
@@ -332,6 +324,21 @@ def collect_request(args, points, ask):
         'destination': point(destination), 'color': color}
     validate_request(request)
     return request
+
+
+
+def parse_task_options(line, defaults):
+    class TaskParser(argparse.ArgumentParser):
+        def error(self, message):
+            raise ValueError(message)
+    parser = TaskParser(add_help=False, allow_abbrev=False)
+    parser.add_argument('--start', default=defaults.start or 'current')
+    parser.add_argument('--destination', '--target', dest='destination',
+                        default=defaults.destination or 'workbench')
+    parser.add_argument('--color', default=defaults.color or 'red')
+    if not line.strip():
+        raise ValueError('다음 작업 옵션을 입력하세요. 예: --start homepoint --destination workbench --color yellow')
+    return parser.parse_args(shlex.split(line))
 
 
 def save_home(path, coordinates):
@@ -357,11 +364,11 @@ def main():
         return 0
     if args.dry_run:
         print(f'파이 {args.host}: source ~/.bashrc → bringup → Nav2(headless) → 집기·귀환 FSM')
-        print('노트북: source ~/.bashrc → RViz → 출발·귀환 / 집기 목적지 / 색상 입력')
+        print('노트북: source ~/.bashrc → RViz → 실행 옵션으로 첫 작업 → 완료 후 다음 작업 옵션 대기')
         print('초기 위치: ' + ('RViz 수동 지정' if args.manual_initial_pose else args.initial_waypoint + ' 자동 지정'))
         print(f'집기 접근: 도착 확인 → 정면 {args.pick_approach_distance*100:g}cm 전진 → '
               f'집기·운반 자세 확인 → {args.pick_approach_distance*100:g}cm 후진 → 귀환')
-        print('작업 시작 전 홈 정렬. 완료 후 다음 명령 대기(--once는 종료). 귀환 후 ' +
+        print('초기 좌표 설정 후 작업대로 이동. 완료 후 다음 명령 대기(--once는 종료). 귀환 후 ' +
               ('내려놓고 팔을 접습니다.' if args.place_on_return else '블록을 운반 자세로 유지합니다.'))
         if args.start or args.destination or args.color:
             import yaml
@@ -369,6 +376,7 @@ def main():
             print(json.dumps(request, ensure_ascii=False, indent=2))
         return 0
     metadata = local_metadata(args)
+    first_request = None if args.check or args.setup_only else collect_request(args, metadata[4])
     session = time.strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:8]
     logs = Path(tempfile.mkdtemp(prefix='execute-robot-logs-'))
     manager, ssh = Processes(logs), SSH(args.host)
@@ -420,7 +428,7 @@ def main():
         if args.manual_initial_pose:
             print('RViz 2D Pose Estimate로 실제 초기 위치·방향을 맞추세요.', flush=True)
         else:
-            print(f'{args.initial_waypoint} 부근에서 초기 추정 → 라이다 위치 갱신 → homepoint로 실제 이동·정렬합니다.', flush=True)
+            print(f'{args.initial_waypoint} 초기 좌표를 설정한 뒤 바로 작업을 실행합니다.', flush=True)
         events.wait('ready', manager, args.timeout * 3 + 90)
         if args.setup_only:
             print('기동 유지 모드: 종료 Ctrl+C', flush=True)
@@ -436,23 +444,26 @@ def main():
         count=0
         initial_args=True
         while True:
-            request_args = args if initial_args else argparse.Namespace(**dict(vars(args),start=None,destination=None,color=None))
-            initial_args=False
             try:
-                request = collect_request(request_args, metadata[4], lambda prompt: terminal_input(prompt, check))
+                if initial_args:
+                    initial_args=False
+                    request=first_request
+                else:
+                    line=terminal_input('다음 작업 옵션> ', check)
+                    request=collect_request(parse_task_options(line,args), metadata[4])
             except ValueError as exc:
                 print(f'입력 오류: {exc}. 다시 입력하세요.',flush=True)
                 continue
             count+=1
             (logs / f'mission-request-{count:04d}.json').write_text(json.dumps(request, ensure_ascii=False, indent=2))
-            print(f"실행: 홈 정렬 → {request['destination_name']}에서 "
+            print(f"실행: {request['destination_name']}에서 "
                   f"{request['color']} 집기 → {request['start_name']} 귀환", flush=True)
             send({'type': 'mission', 'request': request})
             total = (args.timeout + args.nav_timeout * 3 +
                      args.arm_timeout * (4 if args.place_on_return else 3) + 120)
             result = events.wait('mission_done', manager, total)
             if result and result.get('outcome') == 'deferred':
-                print('위치 보정 미완료로 작업을 보류했습니다. 다음 명령 입력 시 다시 보정합니다.',flush=True)
+                print('작업을 보류했습니다. 로봇 상태를 확인한 뒤 다음 명령을 입력하세요.',flush=True)
                 if not args.once:
                     continue
                 remote.wait(timeout=35)

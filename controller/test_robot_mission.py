@@ -87,6 +87,9 @@ class FakeMission(worker.Mission):
     def refine_localization(self):
         self.trace.append('refine_localization')
 
+    def retreat_with_retry(self, distance):
+        return self.short_move(-distance,'RETREATING_FROM_PICK')
+
     def short_move(self, distance, state):
         self.trace.append((state, distance))
         if self.failure == state:
@@ -100,56 +103,62 @@ class FakeMission(worker.Mission):
 
 
 class MissionTests(unittest.TestCase):
-    def test_nomotion_localization_requires_fresh_scan_and_low_uncertainty(self):
-        for mode in ('good','approximate','converging','uncertain','stale'):
-            with self.subTest(mode=mode):
-                clock=[20.]
-                m=object.__new__(worker.Mission);m.amcl_pose=None
-                m.nav=SimpleNamespace(get_clock=lambda:SimpleNamespace(
-                    now=lambda:SimpleNamespace(nanoseconds=int(clock[0]*1e9))))
-                calls=[]
-                def request(_):
-                    calls.append(True);f=Future();f.set_result(object());return f
-                m.nomotion_client=SimpleNamespace(wait_for_service=lambda **kwargs:True,
-                    call_async=request,remove_pending_request=lambda future:None)
-                def spin(*args,**kwargs):
-                    clock[0]+=.1
-                    covariance=[0.]*36
-                    covariance[0]=covariance[7]=(.09 if mode=='uncertain' or
-                        (mode=='converging' and len(calls)<8) else (.15**2 if mode=='approximate' else .001))
-                    covariance[35]=math.radians(15)**2 if mode=='approximate' else .001
-                    stamp=clock[0] if mode!='stale' else 1.
-                    msg=SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(
-                        sec=int(stamp),nanosec=int((stamp%1)*1e9))),
-                        pose=SimpleNamespace(covariance=covariance))
-                    m.amcl_pose=(msg,clock[0])
-                m.rclpy=SimpleNamespace(spin_once=spin)
-                with patch.dict(sys.modules,{'std_srvs.srv':SimpleNamespace(Empty=SimpleNamespace(Request=lambda:object()))}), \
-                     patch.object(worker.time,'monotonic',lambda:clock[0]),contextlib.redirect_stdout(io.StringIO()):
-                    if mode in ('good','approximate','converging'):
-                        m.refine_localization()
-                        self.assertEqual(len(calls),8 if mode=='converging' else 3)
-                    else:
-                        with self.assertRaises(worker.LocalizationNotReady):m.refine_localization()
+    def test_failure_reset_parks_releases_verifies_torque_and_resets_state(self):
+        for holding in (False,True):
+            with self.subTest(holding=holding):
+                trace=[]
+                tasks=SimpleNamespace(park_q={'joint':0},holding=holding,pose='carry',
+                    _torque_is_on=lambda:True)
+                def park():trace.append('park')
+                tasks.park=park
+                arm=SimpleNamespace(read_deg=lambda:{'joint':0},
+                    gripper_torque_on=lambda:trace.append('gripper_on'),
+                    gripper_open=lambda value:trace.append(('release',value)),
+                    _read=lambda *args:{'joint':0,'gripper':0})
+                arm.bus=SimpleNamespace(motors={'joint':1,'gripper':2},
+                    disable_torque=lambda motors,**kwargs:trace.append(('off',motors)))
+                tasks.arm=arm
+                with patch.object(worker.time,'sleep'):
+                    result=worker.reset_arm_tasks(tasks,lambda actual,target:True)
+                self.assertEqual(trace,['park','gripper_on',('release',45),('off',['joint','gripper'])])
+                self.assertFalse(tasks.holding)
+                self.assertEqual(tasks.pose,'park')
+                self.assertTrue(result['torque_off'])
 
-    def test_home_alignment_failure_prevents_pick_navigation(self):
+    def test_failure_reset_never_disables_torque_before_park_confirmation(self):
+        tasks=SimpleNamespace(park_q={},_torque_is_on=lambda:True,park=lambda:None)
+        tasks.arm=SimpleNamespace(read_deg=lambda:{},
+            gripper_torque_on=lambda:self.fail('must not release'),
+            bus=SimpleNamespace(disable_torque=lambda *a,**kw:self.fail('must not drop arm')))
+        with self.assertRaisesRegex(RuntimeError,'park 자세 확인 실패'):
+            worker.reset_arm_tasks(tasks,lambda *args:False)
+
+    def test_mission_error_recovers_before_cleanup_and_failure_exit(self):
+        for reset_fails in (False,True):
+            with self.subTest(reset_fails=reset_fails),tempfile.TemporaryDirectory() as folder:
+                trace=[]
+                class Mission:
+                    def __init__(self,config):self.current_goal=None
+                    def run(self,request):trace.append('run');raise RuntimeError('pick failed')
+                    def recover_after_failure(self):
+                        trace.append('reset')
+                        if reset_fails:raise RuntimeError('reset failed')
+                    def close(self):trace.append('close')
+                config=Path(folder)/'config.json';config.write_text('{}')
+                request=Path(folder)/'request.json';request.write_text('{}')
+                argv=['worker','--mode','mission','--config',str(config),'--request',str(request)]
+                with patch.object(worker,'Mission',Mission),patch.object(sys,'argv',argv),                      contextlib.redirect_stdout(io.StringIO()),self.assertRaisesRegex(RuntimeError,'pick failed'):
+                    worker.main()
+                self.assertEqual(trace,['run','reset','close'])
+
+    def test_mission_skips_localization_refinement_and_home_alignment(self):
         mission=FakeMission(failure='ALIGNING_HOME')
-        with contextlib.redirect_stdout(io.StringIO()),self.assertRaises(RuntimeError):
-            mission.run(self.request())
-        self.assertNotIn(('NAVIGATING_TO_PICK',POINT),mission.trace)
-        self.assertNotIn(('pick','yellow'),mission.trace)
-
-    def test_current_return_position_is_captured_after_home_alignment(self):
-        mission=FakeMission()
-        original=mission.navigate
-        aligned=dict(HOME,x=.02)
-        def navigate(point,state):
-            original(point,state)
-            return aligned if state=='ALIGNING_HOME' else point
-        mission.navigate=navigate
+        mission.refine_localization=lambda:self.fail('localization refinement must not run')
         with contextlib.redirect_stdout(io.StringIO()):
             mission.run(self.request())
-        self.assertIn(('RETURNING',aligned),mission.trace)
+        self.assertNotIn(('ALIGNING_HOME',HOME),mission.trace)
+        self.assertIn(('NAVIGATING_TO_PICK',POINT),mission.trace)
+        self.assertIn(('RETURNING',HOME),mission.trace)
 
     def test_home_guard_does_not_use_pick_position_bypass(self):
         worker.check_arrival(dict(HOME,x=.12,yaw=.15),HOME,position_limit=.15,yaw_limit=.20)
@@ -538,10 +547,88 @@ class MissionTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             mission.run(self.request())
         self.assertEqual(mission.trace, ['localize', 'stopped', ('status', None),
-            ('park', None), 'refine_localization', ('ALIGNING_HOME', HOME),
+            ('park', None),
             ('NAVIGATING_TO_PICK', POINT), ('pick_footprint', True),
             ('APPROACHING_PICK', .1), ('pick', 'yellow'), ('RETREATING_FROM_PICK', -.1),
             ('pick_footprint', False), ('RETURNING', HOME)])
+
+    def test_reverse_step_stops_on_completion_stall_or_odometry_loss(self):
+        for mode in ('moving','stalled','stale'):
+            with self.subTest(mode=mode):
+                m=object.__new__(worker.Mission)
+                clock=[0.];position=[0.];speed=[0.];commands=[]
+                m.stationary=lambda:None
+                def odometry():
+                    if mode=='stale' and clock[0]>.1:
+                        raise RuntimeError('odometry lost')
+                    return dict(x=position[0],y=0.,yaw=0.)
+                def spin(*args,**kwargs):
+                    clock[0]+=.05
+                    if mode=='moving':position[0]+=speed[0]*.05
+                def publish(command):
+                    speed[0]=command.linear.x;commands.append(speed[0])
+                def stop():
+                    speed[0]=0.;commands.append(0.)
+                m.odom_position=odometry;m.nav=object()
+                m.rclpy=SimpleNamespace(spin_once=spin)
+                m.velocity=SimpleNamespace(publish=publish);m.stop_base=stop
+                def twist():return SimpleNamespace(linear=SimpleNamespace(x=0.))
+                with patch.dict(sys.modules,{'geometry_msgs.msg':SimpleNamespace(Twist=twist)}),                      patch.object(worker.time,'monotonic',lambda:clock[0]):
+                    if mode=='moving':
+                        m.collision_bypassed_reverse_step(.05)
+                    else:
+                        with self.assertRaises(RuntimeError):m.collision_bypassed_reverse_step(.05)
+                self.assertEqual(commands[-1],0.)
+                self.assertTrue(all(-.03<=v<=0 for v in commands))
+                if mode=='moving':self.assertGreaterEqual(-position[0],.045)
+
+    def test_retreat_collision_failure_retries_in_five_cm_steps(self):
+        m=object.__new__(worker.Mission)
+        m.pending_short_goal=None;m.moving=False
+        position=[0.];steps=[]
+        m.stationary=lambda:None
+        m.odom_position=lambda:dict(x=position[0],y=0.,yaw=0.)
+        def short_move(distance,state):
+            position[0]=-.02
+            raise RuntimeError('Nav2 backup collision')
+        def reverse(distance):
+            steps.append(distance);position[0]-=distance
+        m.short_move=short_move;m.collision_bypassed_reverse_step=reverse
+        with contextlib.redirect_stdout(io.StringIO()):
+            moved=m.retreat_with_retry(.10)
+        self.assertEqual(steps,[.05,.05])
+        self.assertAlmostEqual(moved,-.12)
+
+    def test_retreat_success_does_not_bypass_collisions(self):
+        m=object.__new__(worker.Mission)
+        m.stationary=lambda:None
+        m.odom_position=lambda:dict(x=0.,y=0.,yaw=0.)
+        m.short_move=lambda distance,state:distance
+        m.collision_bypassed_reverse_step=lambda _:self.fail('unexpected bypass')
+        self.assertEqual(m.retreat_with_retry(.1),-.1)
+
+    def test_retreat_extra_attempts_are_bounded(self):
+        m=object.__new__(worker.Mission)
+        m.pending_short_goal=None;m.moving=False
+        m.stationary=lambda:None
+        m.odom_position=lambda:dict(x=0.,y=0.,yaw=0.)
+        def failed(*args):raise RuntimeError('backup failed')
+        m.short_move=failed
+        steps=[];m.collision_bypassed_reverse_step=steps.append
+        with contextlib.redirect_stdout(io.StringIO()),self.assertRaises(worker.LocalizationNotReady):
+            m.retreat_with_retry(.1)
+        self.assertEqual(steps,[.05,.05,.05])
+
+    def test_retreat_stall_stops_further_retries(self):
+        m=object.__new__(worker.Mission)
+        m.pending_short_goal=None;m.moving=False
+        m.stationary=lambda:None
+        m.odom_position=lambda:dict(x=0.,y=0.,yaw=0.)
+        def failed(*args):raise RuntimeError('no progress')
+        m.short_move=failed
+        m.collision_bypassed_reverse_step=failed
+        with contextlib.redirect_stdout(io.StringIO()),self.assertRaisesRegex(worker.LocalizationNotReady,'자동 후진 중단'):
+            m.retreat_with_retry(.1)
 
     def test_unacknowledged_footprint_never_approaches_or_picks(self):
         mission = FakeMission(failure='footprint')
@@ -724,18 +811,25 @@ class MissionTests(unittest.TestCase):
             result = cli.collect_request(args, {'workbench': POINT}, lambda _: self.fail('unexpected prompt'))
         self.assertEqual(result['color'], 'red')
 
-    def test_cli_prompts_for_missing_yaw_without_guessing(self):
+    def test_cli_rejects_missing_yaw_without_prompting(self):
         args = argparse.Namespace(start='homepoint', destination='workbench', color='blue')
         points = {'workbench': dict(POINT), 'homepoint': dict(HOME, yaw=None)}
-        prompts = []
-        def ask(prompt):
-            prompts.append(prompt)
-            return '-1.2'
-        with contextlib.redirect_stdout(io.StringIO()):
-            result = cli.collect_request(args, points, ask)
-        self.assertEqual(result['start']['yaw'], -1.2)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError,'homepoint.yaw'):
+            cli.collect_request(args, points, lambda _:self.fail('unexpected prompt'))
         self.assertIsNone(points['homepoint']['yaw'])
-        self.assertEqual(len(prompts), 1)
+
+    def test_task_options_defaults_and_validation(self):
+        defaults=argparse.Namespace(start='homepoint',destination='workbench',color='yellow')
+        args=cli.parse_task_options('--color red',defaults)
+        self.assertEqual((args.start,args.destination,args.color),('homepoint','workbench','red'))
+        for invalid in ('','--host other','--color','--color "'):
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                cli.parse_task_options(invalid,defaults)
+        with contextlib.redirect_stdout(io.StringIO()):
+            request=cli.collect_request(argparse.Namespace(start=None,destination=None,color=None),
+                {'workbench':POINT},lambda _:self.fail('unexpected prompt'))
+        self.assertEqual(request['start'],'current')
+        self.assertEqual(request['color'],'red')
 
     def test_unknown_destination(self):
         args = argparse.Namespace(start='current', destination='unknown', color='red')
@@ -796,8 +890,8 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(yaml.safe_load(ssh.files[map_path])['image'], 'map.pgm')
         self.assertIn('mission_control/runs/test', str(worker_path))
         config=json.loads(ssh.files[str(config_path)])
-        self.assertEqual(config['home_pose'],HOME)
-        self.assertIn(config['home_behavior_tree'],ssh.files)
+        self.assertNotIn('home_pose',config)
+        self.assertNotIn('home_behavior_tree',config)
         self.assertIn(config['normal_behavior_tree'],ssh.files)
         self.assertFalse(config['once'])
 
@@ -965,12 +1059,12 @@ class MissionTests(unittest.TestCase):
                 def close(self): pass
                 def run(self,*args,**kwargs): return 'checked'
                 def command(self,*args): return [sys.executable,'-u',str(fake)]
-            replies=iter(['current','workbench','red','current','workbench','yellow'])
+            replies=iter(['--color invalid','--start current --destination workbench --color yellow'])
             def ask(prompt,check):
                 check()
                 try:return next(replies)
                 except StopIteration:raise cli.SessionExit()
-            argv=['execute_robot.py','--no-rviz','--start','current','--destination','workbench','--color','invalid']
+            argv=['execute_robot.py','--no-rviz','--start','current','--destination','workbench','--color','red']
             metadata=({},Path('image'),{},Path('rviz'),{'workbench':POINT})
             with patch.object(sys,'argv',argv),patch.object(cli,'SSH',SSH), \
                  patch.object(cli,'local_metadata',return_value=metadata), \

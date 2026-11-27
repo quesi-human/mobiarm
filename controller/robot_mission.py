@@ -316,7 +316,7 @@ class Processes:
                 entry[2].close()
                 self.entries.remove(entry)
         if process.returncode == 75:
-            raise LocalizationNotReady('위치 보정 미완료: 작업을 보류했습니다. 로그: '+str(path))
+            raise LocalizationNotReady('작업을 보류했습니다. 로그: '+str(path))
         if process.returncode:
             raise RuntimeError(f'{name} 실패({process.returncode}): {output[-3000:]}')
         return output
@@ -488,7 +488,7 @@ def run_stack(config, config_path):
                     (4 if config.get('place_on_return') else 3) + config['timeout'] + 90)
             except LocalizationNotReady as exc:
                 outcome='deferred'
-                event('localization_wait',message=str(exc))
+                event('mission_paused',message=str(exc))
             event('mission_done',mission_id=sequence,outcome=outcome)
             if config.get('once',False):
                 return
@@ -551,6 +551,53 @@ def install_park_guard(tasks_class, near_park, stop_error):
     tasks_class.park = checked_park
 
 
+def reset_arm_tasks(tasks, near_park):
+    """Return to recorded park, release the object, then reset all torque."""
+    if tasks.park_q is None:
+        raise RuntimeError('실패 복구용 park 자세가 없습니다.')
+    if tasks._torque_is_on():
+        tasks.park()
+    if not near_park(tasks.arm.read_deg(), tasks.park_q):
+        raise RuntimeError('실패 복구 park 자세 확인 실패: 강제 토크 OFF를 중단합니다.')
+    tasks.arm.gripper_torque_on()
+    tasks.arm.gripper_open(45)
+    time.sleep(.5)
+    tasks.holding=False
+    motors=list(tasks.arm.bus.motors)
+    tasks.arm.bus.disable_torque(motors,num_retry=2)
+    if any(tasks.arm._read('Torque_Enable',motors).values()):
+        raise RuntimeError('실패 복구 토크 OFF 확인 실패')
+    tasks.pose='park'
+    return {'ok':True,'cmd':'recover','result':'initialized','holding':False,
+            'pose':'park','torque_off':True}
+
+
+def run_arm_reset():
+    import contextlib
+    import arm_cli
+    from robot import devices as DEV, park as P
+    from robot.tasks import ArmTasks
+    arm_cli.LOCK_FILE.parent.mkdir(parents=True,exist_ok=True)
+    with arm_cli.LOCK_FILE.open('w') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        tasks=None
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                tasks=ArmTasks(DEV.ARM_PORT,DEV.WRIST_CAM)
+                saved=arm_cli._load_state()
+                tasks.holding=bool(saved.get('holding'))
+                tasks.pose=saved.get('pose','unknown')
+                result=reset_arm_tasks(tasks,P.near_park)
+                arm_cli._save_state(tasks)
+            return result
+        finally:
+            if tasks is not None:
+                # Torque was explicitly verified OFF on success. On a failed
+                # park, detach rather than dropping an extended arm.
+                with contextlib.redirect_stdout(sys.stderr):
+                    tasks.detach()
+
+
 class Mission:
     def __init__(self, config):
         import rclpy
@@ -562,8 +609,6 @@ class Mission:
         from sensor_msgs.msg import LaserScan
         from geometry_msgs.msg import Twist
         from geometry_msgs.msg import Polygon, PolygonStamped
-        from geometry_msgs.msg import PoseWithCovarianceStamped
-        from std_srvs.srv import Empty
         from rclpy.action import ActionClient
         from nav2_msgs.action import DriveOnHeading
         from rclpy.qos import qos_profile_sensor_data
@@ -576,10 +621,6 @@ class Mission:
         self.pending_short_goal = None
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self.nav)
-        self.amcl_pose=None
-        self.amcl_subscription=self.nav.create_subscription(PoseWithCovarianceStamped,
-            '/amcl_pose',self.on_amcl_pose,qos_profile_sensor_data)
-        self.nomotion_client=self.nav.create_client(Empty,'/request_nomotion_update')
         self.footprint_observation = None
         self.original_local_footprint = None
         self.footprint_publisher = self.nav.create_publisher(Polygon, '/local_costmap/footprint', 10)
@@ -613,46 +654,6 @@ class Mission:
 
     def on_odom(self, msg):
         self.odom = (msg, time.monotonic())
-
-    def on_amcl_pose(self,msg):
-        self.amcl_pose=(msg,time.monotonic())
-
-    def refine_localization(self):
-        from std_srvs.srv import Empty
-        event('state',state='REFINING_LOCALIZATION')
-        if not self.nomotion_client.wait_for_service(timeout_sec=5):
-            raise LocalizationNotReady('AMCL 정지 위치 갱신 서비스 대기 중')
-        # Allow repeated sensor updates to converge; never reset the pose or
-        # bypass the uncertainty check just to let the mission move.
-        for attempt in range(30):
-            started=time.monotonic()
-            ros_started=self.nav.get_clock().now().nanoseconds/1e9
-            future=self.nomotion_client.call_async(Empty.Request())
-            deadline=started+5
-            while time.monotonic()<deadline:
-                self.rclpy.spin_once(self.nav,timeout_sec=.1)
-                if future.done():
-                    future.result()
-                    if self.amcl_pose and self.amcl_pose[1]>started:
-                        stamp=self.amcl_pose[0].header.stamp
-                        if stamp.sec+stamp.nanosec/1e9>ros_started:
-                            break
-            else:
-                self.nomotion_client.remove_pending_request(future)
-                raise LocalizationNotReady('AMCL 라이다 위치 갱신 대기 중')
-            covariance=self.amcl_pose[0].pose.covariance
-            valid=all(math.isfinite(covariance[i]) and covariance[i]>=0 for i in (0,7,35))
-            converged=(valid and max(covariance[0],covariance[7])<=.20**2
-                       and covariance[35]<=math.radians(20)**2)
-            if attempt>=2 and converged:
-                event('localization_refined',covariance_xy=[covariance[0],covariance[7]],
-                      covariance_yaw=covariance[35],updates=attempt+1)
-                return
-            if attempt%3==2:
-                event('localization_wait',updates=attempt+1,
-                      covariance_xy=[covariance[0],covariance[7]],covariance_yaw=covariance[35],
-                      message='정지 상태에서 라이다 위치 보정 재시도 중')
-        raise LocalizationNotReady('AMCL 위치 추정이 아직 불확실합니다. 이동을 보류하고 명령 대기를 유지합니다.')
 
     def on_footprint(self, msg):
         self.footprint_observation = (msg, time.monotonic())
@@ -858,7 +859,7 @@ class Mission:
         self.scan_history.clear()
         self.navigation_snapshot('start', point)
         self.moving = True
-        tree=self.config.get('home_behavior_tree' if state=='ALIGNING_HOME' else 'normal_behavior_tree')
+        tree=self.config.get('normal_behavior_tree')
         accepted = self.nav.goToPose(goal,behavior_tree=tree) if tree else self.nav.goToPose(goal)
         if accepted is False:
             raise RuntimeError('Nav2가 이동 목표를 거절했습니다.')
@@ -882,8 +883,6 @@ class Mission:
             self.navigation_snapshot('failed', point)
             raise RuntimeError('Nav2 이동 실패: ' + result.name)
         self.stationary()
-        if state=='ALIGNING_HOME':
-            self.refine_localization()
         actual = self.pose()
         if actual is None:
             raise RuntimeError('도착 후 map TF 없음')
@@ -891,7 +890,7 @@ class Mission:
                           self.config.get('check_pick_position', False))
         distance, angle = check_arrival(actual, point, check_position,
             position_limit=.15,
-            yaw_limit=.20 if state=='ALIGNING_HOME' else .15)
+            yaw_limit=.15)
         event('arrived', distance_error_m=distance, yaw_error_rad=angle,
               position_check=check_position)
         return actual
@@ -970,6 +969,93 @@ class Mission:
               measured_distance_m=measured, odometry=actual)
         return measured
 
+    def collision_bypassed_reverse_step(self, distance):
+        """Bounded recovery only: odometry-controlled reverse, no costmap veto."""
+        from geometry_msgs.msg import Twist
+        if not math.isfinite(distance) or not 0 < distance <= .05:
+            raise ValueError('자동 추가 후진은 1회 최대 5cm')
+        self.stationary()
+        origin=self.odom_position()
+        start=time.monotonic()
+        last_progress=start
+        best=0.
+        try:
+            while True:
+                self.rclpy.spin_once(self.nav,timeout_sec=.05)
+                actual=self.odom_position()
+                dx,dy=actual['x']-origin['x'],actual['y']-origin['y']
+                c,s=math.cos(origin['yaw']),math.sin(origin['yaw'])
+                progress=-(c*dx+s*dy)
+                lateral=-s*dx+c*dy
+                angle=abs(math.atan2(math.sin(actual['yaw']-origin['yaw']),
+                                     math.cos(actual['yaw']-origin['yaw'])))
+                if not all(math.isfinite(v) for v in (progress,lateral,angle)):
+                    raise RuntimeError('자동 후진 오도메트리 값 오류')
+                if abs(lateral)>.03 or angle>.12 or progress<-.01:
+                    raise RuntimeError('자동 후진 중 방향/옆밀림 오차 초과')
+                if progress>=distance-.005:
+                    break
+                now=time.monotonic()
+                if progress>best+.002:
+                    best=progress
+                    last_progress=now
+                if now-last_progress>2 or now-start>distance/.03+4:
+                    raise RuntimeError('자동 후진 진전 없음: 추가 밀기를 중단합니다.')
+                command=Twist()
+                command.linear.x=-.03
+                self.velocity.publish(command)
+        finally:
+            self.stop_base()
+        self.stationary()
+
+    def retreat_with_retry(self, distance):
+        if not math.isfinite(distance) or not 0 < distance <= .30:
+            raise ValueError('후진 거리 설정 오류')
+        self.stationary()
+        origin=self.odom_position()
+        try:
+            return self.short_move(-distance,'RETREATING_FROM_PICK')
+        except RuntimeError as exc:
+            event('retreat_retry',message=str(exc),extra_step_m=.05,
+                  max_extra_steps=3,collision_check=False)
+        # Ensure Nav2 has stopped commanding the base before publishing directly.
+        if self.pending_short_goal is not None:
+            raise LocalizationNotReady('후진 목표 취소 응답 대기: 작업을 보류합니다.')
+        if self.moving:
+            self.nav.cancelTask()
+            deadline=time.monotonic()+3
+            while not self.nav.isTaskComplete():
+                self.rclpy.spin_once(self.nav,timeout_sec=.1)
+                if time.monotonic()>deadline:
+                    raise LocalizationNotReady('Nav2 후진 취소 확인 실패')
+            self.moving=False
+        self.stationary()
+        budget=min(.30,distance+.15)
+        for attempt in range(4):
+            actual=self.odom_position()
+            dx,dy=actual['x']-origin['x'],actual['y']-origin['y']
+            c,s=math.cos(origin['yaw']),math.sin(origin['yaw'])
+            backed=-(c*dx+s*dy)
+            lateral=-s*dx+c*dy
+            angle=abs(math.atan2(math.sin(actual['yaw']-origin['yaw']),
+                                 math.cos(actual['yaw']-origin['yaw'])))
+            if (not all(math.isfinite(v) for v in (backed,lateral,angle)) or
+                    abs(lateral)>.03 or angle>.12 or backed<-.01 or backed>budget+.01):
+                raise LocalizationNotReady('후진 복구 위치/방향 검사 실패')
+            if backed>=distance-.015:
+                event('retreat_recovered',measured_distance_m=backed,extra_steps=attempt)
+                return -backed
+            if attempt==3:
+                break
+            step=min(.05,budget-max(0.,backed))
+            event('state',state='RETREATING_RECOVERY',attempt=attempt+1,
+                  distance_m=step,speed_mps=.03,collision_check=False)
+            try:
+                self.collision_bypassed_reverse_step(step)
+            except RuntimeError as exc:
+                raise LocalizationNotReady('자동 후진 중단: '+str(exc)) from exc
+        raise LocalizationNotReady('자동 추가 후진 3회 후에도 거리 미달: 작업을 보류합니다.')
+
     def arm(self, command, color=None):
         # Convert cancellation into ArmStop INSIDE arm_cli.run. Its error path
         # holds torque and detaches, unlike an unhandled KeyboardInterrupt that
@@ -982,7 +1068,11 @@ class Mission:
                   'import sys\nsys.path.insert(0, ' + repr(str(Path(__file__).resolve().parent)) + ')\n'
                   'from robot_mission import install_park_guard\n'
                   'install_park_guard(ArmTasks, P.near_park, ArmStop)\n'
-                  'import arm_cli\narm_cli.main()\n')
+                  'import arm_cli,sys,json\n'
+                  'if sys.argv[1] == "recover":\n'
+                  '    from robot_mission import run_arm_reset\n'
+                  '    print(json.dumps(run_arm_reset()))\n'
+                  'else:\n    arm_cli.main()\n')
         argv = [self.config['arm_python'], '-u', '-c', bridge, command]
         if color:
             argv += ['--color', color]
@@ -1012,12 +1102,32 @@ class Mission:
         if command == 'pick' and (result.get('result') != 'picked' or
                 result.get('holding') is not True or result.get('pose') != 'carry'):
             raise RuntimeError('집기 성공·운반 자세 확인 실패')
-        expected = {'place': 'placed', 'park': 'parked', 'status': 'status'}
+        expected = {'place': 'placed', 'park': 'parked', 'status': 'status','recover':'initialized'}
         if command in expected and result.get('result') != expected[command]:
             raise RuntimeError('예상과 다른 팔 결과: ' + str(result))
         if command == 'place' and (result.get('holding') is not False or result.get('pose') != 'park'):
             raise RuntimeError('내려놓기·팔 접기 결과 확인 실패: ' + str(result))
+        if command == 'recover' and (result.get('holding') is not False or
+                result.get('pose') != 'park' or result.get('torque_off') is not True):
+            raise RuntimeError('팔 실패 복구·초기화 확인 실패: '+str(result))
         return result
+
+    def recover_after_failure(self):
+        event('state',state='RECOVERING_ARM')
+        if self.arm_process is not None:
+            stop_group(self.arm_process,graces=(3,1,1))
+            self.arm_process=None
+        if self.moving:
+            self.nav.cancelTask()
+            deadline=time.monotonic()+3
+            while not self.nav.isTaskComplete():
+                self.rclpy.spin_once(self.nav,timeout_sec=.1)
+                if time.monotonic()>deadline:
+                    raise RuntimeError('실패 복구 전 Nav2 정지 확인 실패')
+            self.moving=False
+        self.stationary()
+        result=self.arm('recover')
+        event('arm_initialized',result=result)
 
     def run(self, request):
         validate_request(request)
@@ -1034,12 +1144,6 @@ class Mission:
         if status.get('holding'):
             raise RuntimeError('팔이 이미 블록을 보유 중입니다. 기존 작업을 먼저 확인하세요.')
         self.arm('park')
-        self.refine_localization()
-        home=validate_point(self.config['home_pose'])
-        try:
-            current=self.navigate(home,'ALIGNING_HOME')
-        except RuntimeError as exc:
-            raise LocalizationNotReady('홈 정렬 재시도 필요: '+str(exc)) from exc
         start = current if request['start'] == 'current' else request['start']
         self.navigate(request['destination'], 'NAVIGATING_TO_PICK')
         if approach:
@@ -1048,7 +1152,7 @@ class Mission:
         event('state', state='PICKING', color=request['color'])
         self.arm('pick', request['color'])
         if approach:
-            self.short_move(-advanced, 'RETREATING_FROM_PICK')
+            self.retreat_with_retry(advanced)
             self.set_pick_footprint(False)
         self.navigate(start, 'RETURNING')
         if self.config.get('place_on_return'):
@@ -1115,18 +1219,20 @@ def main():
         mission = Mission(config)
         try:
             mission.run(json.loads(args.request.read_text()))
-        except LocalizationNotReady as exc:
-            event('state', state='WAITING_FOR_LOCALIZATION', message=str(exc))
-            raise SystemExit(75)
-        except BaseException as exc:
+        except Exception as exc:
             event('state', state='ERROR', message=str(exc) or type(exc).__name__)
             if mission.current_goal is not None:
                 try:
-                    mission.navigation_snapshot('interrupted' if isinstance(exc, KeyboardInterrupt)
-                                                else 'error', mission.current_goal)
+                    mission.navigation_snapshot('error',mission.current_goal)
                 except Exception as snapshot_error:
-                    event('snapshot_error', message=str(snapshot_error))
-            raise
+                    event('snapshot_error',message=str(snapshot_error))
+            try:
+                mission.recover_after_failure()
+            except Exception as recovery_error:
+                event('arm_recovery_failed',message=str(recovery_error))
+            # Fail only after the arm recovery attempt has completed. The
+            # supervisor then tears down bringup/Nav2 and the laptop exits.
+            raise RuntimeError(str(exc)) from exc
         finally:
             mission.close()
 
