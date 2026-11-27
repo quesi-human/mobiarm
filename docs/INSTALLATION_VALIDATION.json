@@ -1,7 +1,7 @@
 {
   "date": "2026-11-26",
   "timezone": "Asia/Seoul",
-  "controller_tests": 55,
+  "controller_tests": 62,
   "installer_tests": 5,
   "laptop_install_completed": true,
   "robot_install_completed": true,
@@ -11,5 +11,9 @@
   "original_desktop_files_hash_verified": 21,
   "fresh_os_driver_build_tested": false,
   "robot_prefix": "/home/turtlebot6/pjt_soarm_turtlebot",
-  "new_path_check_passed": true
+  "new_path_check_passed": true,
+  "last_development_check": "2026-11-27",
+  "persistent_two_command_session_tested": true,
+  "homing_requires_fresh_amcl": true,
+  "hardware_test_performed": false
 }

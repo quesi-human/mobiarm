@@ -62,7 +62,7 @@ class SelfFilterTests(unittest.TestCase):
 
 class FakeMission(worker.Mission):
     def __init__(self, failure=None, place=False):
-        self.config = {'place_on_return': place}
+        self.config = {'place_on_return': place, 'home_pose':dict(HOME)}
         self.trace, self.failure = [], failure
 
     def localize(self):
@@ -82,6 +82,10 @@ class FakeMission(worker.Mission):
         self.trace.append((state, point))
         if self.failure == state:
             raise RuntimeError(state + ' failed')
+        return dict(point)
+
+    def refine_localization(self):
+        self.trace.append('refine_localization')
 
     def short_move(self, distance, state):
         self.trace.append((state, distance))
@@ -96,6 +100,111 @@ class FakeMission(worker.Mission):
 
 
 class MissionTests(unittest.TestCase):
+    def test_nomotion_localization_requires_fresh_scan_and_low_uncertainty(self):
+        for mode in ('good','uncertain','stale'):
+            with self.subTest(mode=mode):
+                clock=[20.]
+                m=object.__new__(worker.Mission);m.amcl_pose=None
+                m.nav=SimpleNamespace(get_clock=lambda:SimpleNamespace(
+                    now=lambda:SimpleNamespace(nanoseconds=int(clock[0]*1e9))))
+                calls=[]
+                def request(_):
+                    calls.append(True);f=Future();f.set_result(object());return f
+                m.nomotion_client=SimpleNamespace(wait_for_service=lambda **kwargs:True,
+                    call_async=request,remove_pending_request=lambda future:None)
+                def spin(*args,**kwargs):
+                    clock[0]+=.1
+                    covariance=[0.]*36
+                    covariance[0]=covariance[7]=.02 if mode=='uncertain' else .001
+                    covariance[35]=.001
+                    stamp=clock[0] if mode!='stale' else 1.
+                    msg=SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(
+                        sec=int(stamp),nanosec=int((stamp%1)*1e9))),
+                        pose=SimpleNamespace(covariance=covariance))
+                    m.amcl_pose=(msg,clock[0])
+                m.rclpy=SimpleNamespace(spin_once=spin)
+                with patch.dict(sys.modules,{'std_srvs.srv':SimpleNamespace(Empty=SimpleNamespace(Request=lambda:object()))}), \
+                     patch.object(worker.time,'monotonic',lambda:clock[0]),contextlib.redirect_stdout(io.StringIO()):
+                    if mode=='good':
+                        m.refine_localization()
+                        self.assertEqual(len(calls),3)
+                    else:
+                        with self.assertRaises(RuntimeError):m.refine_localization()
+
+    def test_home_alignment_failure_prevents_pick_navigation(self):
+        mission=FakeMission(failure='ALIGNING_HOME')
+        with contextlib.redirect_stdout(io.StringIO()),self.assertRaises(RuntimeError):
+            mission.run(self.request())
+        self.assertNotIn(('NAVIGATING_TO_PICK',POINT),mission.trace)
+        self.assertNotIn(('pick','yellow'),mission.trace)
+
+    def test_current_return_position_is_captured_after_home_alignment(self):
+        mission=FakeMission()
+        original=mission.navigate
+        aligned=dict(HOME,x=.02)
+        def navigate(point,state):
+            original(point,state)
+            return aligned if state=='ALIGNING_HOME' else point
+        mission.navigate=navigate
+        with contextlib.redirect_stdout(io.StringIO()):
+            mission.run(self.request())
+        self.assertIn(('RETURNING',aligned),mission.trace)
+
+    def test_home_guard_does_not_use_pick_position_bypass(self):
+        with self.assertRaises(RuntimeError):
+            worker.check_arrival(dict(HOME,x=.05),HOME,position_limit=.04,yaw_limit=.05)
+        with self.assertRaises(RuntimeError):
+            worker.check_arrival(dict(HOME,yaw=.06),HOME,position_limit=.04,yaw_limit=.05)
+
+    def test_behavior_trees_select_unambiguous_goal_checkers(self):
+        import xml.etree.ElementTree as ET
+        root=Path(__file__).parent
+        home=ET.parse(root/'home_alignment.xml').find('.//FollowPath')
+        normal=ET.parse(root/'navigation.xml').find('.//FollowPath')
+        self.assertEqual(home.attrib['goal_checker_id'],'home_goal_checker')
+        self.assertEqual(normal.attrib['goal_checker_id'],'general_goal_checker')
+
+    def test_remote_stack_executes_two_missions_and_waits_until_stopped(self):
+        import queue
+        commands=[]
+        class Control:
+            def __init__(self):
+                self.messages=queue.Queue()
+                for _ in range(2):
+                    self.messages.put({'start':'current','destination':POINT,'color':'yellow'})
+            def check(self):
+                if len([n for n in commands if n.startswith('mission-')])==2:
+                    raise KeyboardInterrupt()
+        class Manager:
+            def __init__(self,*args):
+                pass
+            def start(self,name,argv):
+                commands.append(name)
+            def run(self,name,argv,timeout):
+                commands.append(name)
+                return '[]' if name=='graph' else ''
+            def check(self):
+                control.check()
+            def close(self):
+                commands.append('closed')
+        control=Control()
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'session/config.json';path.parent.mkdir()
+            config={'logs':folder,'timeout':5,'nav_timeout':5,'arm_timeout':5,
+                'reuse_bringup':False,'reuse_nav2':False,'map':'map','params_file':'params',
+                'navigation_launch':'launch'}
+            output=io.StringIO()
+            with patch.object(worker,'Control',return_value=control),patch.object(worker,'Processes',Manager), \
+                 patch.object(worker,'dependencies'),contextlib.redirect_stdout(output),self.assertRaises(KeyboardInterrupt):
+                worker.run_stack(config,path)
+            self.assertEqual([n for n in commands if n.startswith('mission-')],['mission-0001','mission-0002'])
+            first=json.loads(path.with_name('mission-config-0001.json').read_text())
+            second=json.loads(path.with_name('mission-config-0002.json').read_text())
+            self.assertNotEqual(first['logs'],second['logs'])
+            self.assertEqual(output.getvalue().count('"event": "mission_done"'),2)
+            self.assertGreaterEqual(output.getvalue().count('"state": "IDLE"'),3)
+            self.assertEqual(commands[-1],'closed')
+
     def test_pick_position_guard_can_be_skipped_but_yaw_and_return_stay_checked(self):
         goal = dict(x=0.,y=0.,yaw=0.)
         actual = dict(x=.158,y=0.,yaw=math.radians(3.6))
@@ -425,7 +534,8 @@ class MissionTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             mission.run(self.request())
         self.assertEqual(mission.trace, ['localize', 'stopped', ('status', None),
-            ('park', None), ('NAVIGATING_TO_PICK', POINT), ('pick_footprint', True),
+            ('park', None), 'refine_localization', ('ALIGNING_HOME', HOME),
+            ('NAVIGATING_TO_PICK', POINT), ('pick_footprint', True),
             ('APPROACHING_PICK', .1), ('pick', 'yellow'), ('RETREATING_FROM_PICK', -.1),
             ('pick_footprint', False), ('RETURNING', HOME)])
 
@@ -656,11 +766,16 @@ class MissionTests(unittest.TestCase):
             image = Path(directory) / 'test.pgm'
             image.write_bytes(b'P5\n1 1\n255\n\xff')
             metadata = ({'image': '/old/machine/image.pgm', 'resolution': .05}, image,
-                        {'amcl': {}}, Path('rviz'), {'workbench': POINT})
+                        {'amcl': {}}, Path('rviz'), {'workbench': POINT,'homepoint': HOME})
             worker_path, config_path = cli.deploy(args, ssh, metadata, 'test')
         map_path = str(config_path.with_name('map.yaml'))
         self.assertEqual(yaml.safe_load(ssh.files[map_path])['image'], 'map.pgm')
         self.assertIn('mission_control/runs/test', str(worker_path))
+        config=json.loads(ssh.files[str(config_path)])
+        self.assertEqual(config['home_pose'],HOME)
+        self.assertIn(config['home_behavior_tree'],ssh.files)
+        self.assertIn(config['normal_behavior_tree'],ssh.files)
+        self.assertFalse(config['once'])
 
     def test_partial_event_lines_are_not_lost(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -709,7 +824,7 @@ class MissionTests(unittest.TestCase):
             path.parent.mkdir()
             config = {'logs': directory, 'timeout': 5, 'nav_timeout': 5, 'arm_timeout': 5,
                 'reuse_bringup': False, 'reuse_nav2': False, 'map': '/map.yaml', 'params_file': '/params.yaml',
-                'navigation_launch': '/onboard_navigation.launch.py'}
+                'navigation_launch': '/onboard_navigation.launch.py','once':True}
             with patch.object(worker, 'Control', Control), patch.object(worker, 'Processes', Manager), \
                  patch.object(worker, 'dependencies'), contextlib.redirect_stdout(io.StringIO()):
                 worker.run_stack(config, path)
@@ -784,7 +899,7 @@ class MissionTests(unittest.TestCase):
                     closed.append(True)
             metadata = ({}, Path('image'), {}, Path('rviz'), {'workbench': POINT})
             argv = ['execute_robot.py', '--start', 'current',
-                    '--destination', 'workbench', '--color', 'red']
+                    '--destination', 'workbench', '--color', 'red','--once']
             def fake_shell(argv, domain, model, setup_file=None):
                 if argv[:4] == ['ros2', 'run', 'rviz2', 'rviz2']:
                     return [sys.executable, str(rviz)]
@@ -796,6 +911,39 @@ class MissionTests(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main(), 0)
             self.assertEqual(closed, [True])
+
+    def test_laptop_keeps_stack_for_second_command_and_quits_cleanly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); fake=root/'remote.py'; received=root/'received.json'
+            fake.write_text('import sys,json\nfrom pathlib import Path\n'
+                'prefix='+repr(worker.PREFIX)+'\ncolors=[]\n'
+                'print(prefix+json.dumps({"event":"ready"}),flush=True)\n'
+                'for line in sys.stdin:\n'
+                '    message=json.loads(line)\n'
+                '    if message["type"]=="mission":\n'
+                '        colors.append(message["request"]["color"])\n'
+                '        Path('+repr(str(received))+').write_text(json.dumps(colors))\n'
+                '        print(prefix+json.dumps({"event":"mission_done"}),flush=True)\n'
+                '    elif message["type"]=="stop": break\n')
+            class SSH:
+                def __init__(self,*args): pass
+                def connect(self): pass
+                def close(self): pass
+                def run(self,*args,**kwargs): return 'checked'
+                def command(self,*args): return [sys.executable,'-u',str(fake)]
+            replies=iter(['current','workbench','red','current','workbench','yellow'])
+            def ask(prompt,check):
+                check()
+                try:return next(replies)
+                except StopIteration:raise cli.SessionExit()
+            argv=['execute_robot.py','--no-rviz','--start','current','--destination','workbench','--color','invalid']
+            metadata=({},Path('image'),{},Path('rviz'),{'workbench':POINT})
+            with patch.object(sys,'argv',argv),patch.object(cli,'SSH',SSH), \
+                 patch.object(cli,'local_metadata',return_value=metadata), \
+                 patch.object(cli,'deploy',return_value=(Path('worker'),Path('config'))), \
+                 patch.object(cli,'terminal_input',side_effect=ask),contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(),0)
+            self.assertEqual(json.loads(received.read_text()),['red','yellow'])
 
 
 if __name__ == '__main__':

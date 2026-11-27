@@ -1,6 +1,0 @@
-bash: cannot set terminal process group (-1): Inappropriate ioctl for device
-bash: no job control in this shell
-@@ROBOT_EVENT@@{"event": "checked", "model": "waffle_pi", "domain": "36", "arm_colors": "['blue', 'green', 'orange', 'purple', 'red', 'yellow']"}
-@@ROBOT_EVENT@@{"event": "error", "message": "노트북 제어 연결/heartbeat 종료"}
-@@ROBOT_EVENT@@{"event": "stack_stopped"}
-@@ROBOT_EVENT@@{"event": "error", "message": "노트북 제어 연결/heartbeat 종료"}

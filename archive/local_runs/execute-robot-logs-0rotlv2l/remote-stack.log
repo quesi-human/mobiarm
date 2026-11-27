@@ -1,7 +1,0 @@
-bash: cannot set terminal process group (-1): Inappropriate ioctl for device
-bash: no job control in this shell
-@@ROBOT_EVENT@@{"event": "checked", "model": "waffle_pi", "domain": "36", "arm_colors": "['blue', 'green', 'orange', 'purple', 'red', 'yellow']"}
-@@ROBOT_EVENT@@{"event": "bringup_ready"}
-@@ROBOT_EVENT@@{"event": "error", "message": "nav2 종료(1): [INFO] [launch]: All log files can be found below /home/turtlebot6/.ros/log/2026-11-26-03-02-02-127252-ubuntu-4051\n[INFO] [launch]: Default logging verbosity is set to INFO\n[ERROR] [launch]: Caught exception in launch (see debug for traceback): name 'true' is not defined\n"}
-@@ROBOT_EVENT@@{"event": "stack_stopped"}
-@@ROBOT_EVENT@@{"event": "error", "message": "nav2 종료(1): [INFO] [launch]: All log files can be found below /home/turtlebot6/.ros/log/2026-11-26-03-02-02-127252-ubuntu-4051\n[INFO] [launch]: Default logging verbosity is set to INFO\n[ERROR] [launch]: Caught exception in launch (see debug for traceback): name 'true' is not defined\n"}

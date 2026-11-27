@@ -58,8 +58,8 @@ def validate_request(request):
 def initial_pose_fields(point):
     point = validate_point(point)
     covariance = [0.0] * 36
-    covariance[0] = covariance[7] = .05 ** 2
-    covariance[35] = math.radians(5) ** 2
+    covariance[0] = covariance[7] = .15 ** 2
+    covariance[35] = math.radians(15) ** 2
     return math.sin(point['yaw'] / 2), math.cos(point['yaw'] / 2), covariance
 
 
@@ -173,7 +173,7 @@ def initialize_pose(point, timeout):
             poller.tick(now)
             if not ('amcl' in poller.active(now) and map_seen and publisher.get_subscription_count()):
                 continue
-            if now - last_sent > 2:
+            if first_sent is None:
                 message = PoseWithCovarianceStamped()
                 message.header.frame_id = 'map'
                 message.header.stamp = node.get_clock().now().to_msg()
@@ -307,6 +307,10 @@ class Processes:
             time.sleep(.1)
         forward()
         output = path.read_text(errors='replace')
+        for entry in list(self.entries):
+            if entry[1] is process:
+                entry[2].close()
+                self.entries.remove(entry)
         if process.returncode:
             raise RuntimeError(f'{name} 실패({process.returncode}): {output[-3000:]}')
         return output
@@ -331,6 +335,9 @@ def dependencies(config):
             get_package_share_directory('nav2_regulated_pure_pursuit_controller')
     for key in ('map', 'params_file', 'arm_python', 'arm_cli', 'navigation_launch'):
         if not Path(config[key]).is_file():
+            raise RuntimeError(f'{key} 파일 없음: {config[key]}')
+    for key in ('home_behavior_tree','normal_behavior_tree'):
+        if config.get(key) and not Path(config[key]).is_file():
             raise RuntimeError(f'{key} 파일 없음: {config[key]}')
     if config.get('scan_filter') and not Path(config['scan_filter']).is_file():
         raise RuntimeError('scan_self_filter.py 파일 없음')
@@ -453,6 +460,8 @@ def run_stack(config, config_path):
             processes.run('initial-pose', helper('initial'), config['timeout'] + 10)
         processes.run('nav2-ready', helper('nav2'), config['timeout'] + 10)
         event('ready', logs=config['logs'])
+        sequence=0
+        event('state',state='IDLE')
         while True:
             processes.check()
             try:
@@ -460,14 +469,19 @@ def run_stack(config, config_path):
             except queue.Empty:
                 continue
             validate_request(request)
-            request_file = Path(config_path).with_name('mission.json')
+            sequence+=1
+            request_file = Path(config_path).with_name(f'mission-{sequence:04d}.json')
             request_file.write_text(json.dumps(request, ensure_ascii=False))
-            processes.run('mission', ['/usr/bin/python3', '-u', script, '--mode', 'mission',
-                '--config', str(config_path), '--request', str(request_file)],
-                config['nav_timeout'] * 2 + config['arm_timeout'] *
-                (4 if config.get('place_on_return') else 3) + config['timeout'] + 60)
-            event('mission_done')
-            return
+            mission_config=Path(config_path).with_name(f'mission-config-{sequence:04d}.json')
+            mission_config.write_text(json.dumps(dict(config,logs=str(Path(config['logs'])/f'mission-{sequence:04d}'))))
+            processes.run(f'mission-{sequence:04d}', ['/usr/bin/python3', '-u', script, '--mode', 'mission',
+                '--config', str(mission_config), '--request', str(request_file)],
+                config['nav_timeout'] * 3 + config['arm_timeout'] *
+                (4 if config.get('place_on_return') else 3) + config['timeout'] + 90)
+            event('mission_done',mission_id=sequence)
+            if config.get('once',False):
+                return
+            event('state',state='IDLE')
     except BaseException as exc:
         event('error', message=str(exc) or type(exc).__name__)
         raise
@@ -491,13 +505,13 @@ def verify_short_motion(origin, actual, requested):
     return along
 
 
-def check_arrival(actual, goal, check_position=True):
+def check_arrival(actual, goal, check_position=True, position_limit=.15, yaw_limit=.15):
     distance = math.hypot(actual['x']-goal['x'], actual['y']-goal['y'])
     delta = actual['yaw']-goal['yaw']
     angle = abs(math.atan2(math.sin(delta), math.cos(delta)))
     if not math.isfinite(distance) or not math.isfinite(angle):
         raise RuntimeError('도착 자세에 유효하지 않은 값이 있습니다.')
-    if (check_position and distance > .15) or angle > .15:
+    if (check_position and distance > position_limit) or angle > yaw_limit:
         raise RuntimeError(f'도착 자세 오차 초과: {distance:.3f}m, {math.degrees(angle):.1f}도')
     return distance, angle
 
@@ -537,6 +551,8 @@ class Mission:
         from sensor_msgs.msg import LaserScan
         from geometry_msgs.msg import Twist
         from geometry_msgs.msg import Polygon, PolygonStamped
+        from geometry_msgs.msg import PoseWithCovarianceStamped
+        from std_srvs.srv import Empty
         from rclpy.action import ActionClient
         from nav2_msgs.action import DriveOnHeading
         from rclpy.qos import qos_profile_sensor_data
@@ -549,6 +565,10 @@ class Mission:
         self.pending_short_goal = None
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self.nav)
+        self.amcl_pose=None
+        self.amcl_subscription=self.nav.create_subscription(PoseWithCovarianceStamped,
+            '/amcl_pose',self.on_amcl_pose,qos_profile_sensor_data)
+        self.nomotion_client=self.nav.create_client(Empty,'/request_nomotion_update')
         self.footprint_observation = None
         self.original_local_footprint = None
         self.footprint_publisher = self.nav.create_publisher(Polygon, '/local_costmap/footprint', 10)
@@ -578,9 +598,41 @@ class Mission:
         self.moving = False
         self.arm_process = None
         self.log_root = Path(config['logs'])
+        self.log_root.mkdir(parents=True,exist_ok=True)
 
     def on_odom(self, msg):
         self.odom = (msg, time.monotonic())
+
+    def on_amcl_pose(self,msg):
+        self.amcl_pose=(msg,time.monotonic())
+
+    def refine_localization(self):
+        from std_srvs.srv import Empty
+        event('state',state='REFINING_LOCALIZATION')
+        if not self.nomotion_client.wait_for_service(timeout_sec=5):
+            raise RuntimeError('AMCL 정지 위치 갱신 서비스 없음')
+        for _ in range(3):
+            started=time.monotonic()
+            ros_started=self.nav.get_clock().now().nanoseconds/1e9
+            future=self.nomotion_client.call_async(Empty.Request())
+            deadline=started+5
+            while time.monotonic()<deadline:
+                self.rclpy.spin_once(self.nav,timeout_sec=.1)
+                if future.done():
+                    future.result()
+                    if self.amcl_pose and self.amcl_pose[1]>started:
+                        stamp=self.amcl_pose[0].header.stamp
+                        if stamp.sec+stamp.nanosec/1e9>ros_started:
+                            break
+            else:
+                self.nomotion_client.remove_pending_request(future)
+                raise RuntimeError('AMCL 라이다 위치 갱신 시간 초과')
+        msg,_=self.amcl_pose
+        covariance=msg.pose.covariance
+        if (any(not math.isfinite(covariance[i]) or covariance[i]<0 for i in (0,7,35)) or
+                max(covariance[0],covariance[7])>.10**2 or covariance[35]>math.radians(10)**2):
+            raise RuntimeError('AMCL 위치 추정 불확실성이 큽니다. 맵/라이다/초기 위치를 확인하세요.')
+        event('localization_refined',covariance_xy=[covariance[0],covariance[7]],covariance_yaw=covariance[35])
 
     def on_footprint(self, msg):
         self.footprint_observation = (msg, time.monotonic())
@@ -786,7 +838,9 @@ class Mission:
         self.scan_history.clear()
         self.navigation_snapshot('start', point)
         self.moving = True
-        if self.nav.goToPose(goal) is False:
+        tree=self.config.get('home_behavior_tree' if state=='ALIGNING_HOME' else 'normal_behavior_tree')
+        accepted = self.nav.goToPose(goal,behavior_tree=tree) if tree else self.nav.goToPose(goal)
+        if accepted is False:
             raise RuntimeError('Nav2가 이동 목표를 거절했습니다.')
         deadline = time.monotonic() + self.config['nav_timeout']
         next_sample = 0
@@ -808,14 +862,19 @@ class Mission:
             self.navigation_snapshot('failed', point)
             raise RuntimeError('Nav2 이동 실패: ' + result.name)
         self.stationary()
+        if state=='ALIGNING_HOME':
+            self.refine_localization()
         actual = self.pose()
         if actual is None:
             raise RuntimeError('도착 후 map TF 없음')
         check_position = (state != 'NAVIGATING_TO_PICK' or
                           self.config.get('check_pick_position', False))
-        distance, angle = check_arrival(actual, point, check_position)
+        distance, angle = check_arrival(actual, point, check_position,
+            position_limit=.04 if state=='ALIGNING_HOME' else .15,
+            yaw_limit=.05 if state=='ALIGNING_HOME' else .15)
         event('arrived', distance_error_m=distance, yaw_error_rad=angle,
               position_check=check_position)
+        return actual
 
     def odom_position(self):
         if self.odom is None or time.monotonic()-self.odom[1] > 1:
@@ -946,13 +1005,16 @@ class Mission:
         if not math.isfinite(approach) or not 0 <= approach <= .30:
             raise ValueError('정밀 접근 거리 설정 오류')
         current = self.localize()
-        start = current if request['start'] == 'current' else request['start']
-        event('state', state='PREPARING', return_goal=start)
+        event('state', state='PREPARING')
         self.stationary()
         status = self.arm('status')
         if status.get('holding'):
             raise RuntimeError('팔이 이미 블록을 보유 중입니다. 기존 작업을 먼저 확인하세요.')
         self.arm('park')
+        self.refine_localization()
+        home=validate_point(self.config['home_pose'])
+        current=self.navigate(home,'ALIGNING_HOME')
+        start = current if request['start'] == 'current' else request['start']
         self.navigate(request['destination'], 'NAVIGATING_TO_PICK')
         if approach:
             self.set_pick_footprint(True)

@@ -1,9 +1,0 @@
-bash: 터미털 프로세스 그룹(-1)을 설정할 수 없음: 장치에 대해 부적절한 ioctl
-bash: 이 셸에 작업 제어 없음
-[INFO] [1795670178.287430212] [rviz2]: Stereo is NOT SUPPORTED
-[INFO] [1795670178.287506916] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
-[INFO] [1795670178.300897149] [rviz2]: Stereo is NOT SUPPORTED
-[ERROR] [1795670178.416098004] [rviz2]: PluginlibFactory: The plugin for class 'nav2_rviz_plugins/Selector' failed to load. Error: According to the loaded plugin descriptions the class nav2_rviz_plugins/Selector with base class type rviz_common::Panel does not exist. Declared types are  nav2_rviz_plugins/Navigation 2 slam_toolbox::SlamToolboxPlugin
-[ERROR] [1795670178.416558787] [rviz2]: PluginlibFactory: The plugin for class 'nav2_rviz_plugins/Docking' failed to load. Error: According to the loaded plugin descriptions the class nav2_rviz_plugins/Docking with base class type rviz_common::Panel does not exist. Declared types are  nav2_rviz_plugins/Navigation 2 slam_toolbox::SlamToolboxPlugin
-[INFO] [1795670265.581688418] [rclcpp]: signal_handler(SIGINT/SIGTERM)
-[ros2run]: Segmentation fault

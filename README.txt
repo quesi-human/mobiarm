@@ -80,13 +80,16 @@ Ubuntu 22.04 / ROS 2 Humble / TurtleBot3 Waffle Pi + LDS-03
 7. 미션 흐름
 
   파이 bringup → 자기 몸체 필터 → 파이 Nav2 → 노트북 RViz
-  → 홈 자동 초기화 → 팔 실제 접힘 검사 → 작업대 이동
+  → 홈 부근 초기 추정 → 팔 실제 접힘 검사 → 정지 라이다 위치 갱신
+  → YAML homepoint로 실제 이동·정렬 → 작업대 이동
   → 접근 footprint 확인 → 10cm 전진 → pick·carry 확인
-  → 측정된 전진 거리만큼 후진 → 이동 footprint 복원 → 귀환 → place → 정리.
+  → 측정된 전진 거리만큼 후진 → 이동 footprint 복원 → 귀환 → place
+  → IDLE 대기 → 다음 명령(명령마다 홈 정렬을 다시 수행).
 
   실험 설정 check_pick_position: false는 작업대 위치 추가 검사만 생략한다.
   Nav2 성공·정지·yaw·충돌 검사와 귀환 위치 검사는 유지한다.
-  homepoint 자동 초기화는 로봇을 맵 생성 시작 위치·방향에 놓았다는 전제다.
+  homepoint 부근에 로봇을 놓으면 초기 추정 후 라이다로 보정하고 홈으로 실제 이동한다.
+  이는 홈 근처의 작은 수동 배치 오차 보정용이며, 임의 장소에서의 전역 위치 인식은 아니다.
 
 8. 새 파이 설치 경로에서 팔 단독 실행
 
@@ -106,10 +109,40 @@ Ubuntu 22.04 / ROS 2 Humble / TurtleBot3 Waffle Pi + LDS-03
   robot/ros_ws/               TurtleBot3/LDS-03 드라이버 소스 스냅샷
   robot/requirements.txt      파이 팔 전용 Python 의존성
   installation/              현재 노트북/파이 설치 결과와 자동 접속 설정
-  archive/                   과거 설정·로그·원본 압축 스냅샷
   environment/               원래 장비 환경 기록
   docs/                      파일 안내·검증 기록
 
   파이에 배포할 때 state, 과거 runs/logs, Git, 캐시는 제외한다.
   재설치 시 새 설치 경로의 기존 calibration/state는 덮어쓰지 않는다.
   변경된 코드는 새 설치 경로 backups/<시각>에 먼저 보관한다.
+
+10. 반복 작업 세션과 홈 정렬(2026-11-27)
+
+  기본값은 연속 명령 모드이다. 첫 작업은 CLI의 --start/--destination/--color를 사용한다.
+  완료하면 같은 bringup/Nav2/RViz/SSH 세션을 유지하고 다음 출발·귀환점/목적지/색상을 묻는다.
+  q, quit, exit, 종료 또는 Ctrl+C로 세션을 종료하고 소유 프로세스를 정리한다.
+  한 번만 실행하려면 --once를 추가한다. --setup-only는 기존 기동 유지 전용 모드이다.
+
+  매 작업 시작 시 팔 접힘 확인 → 정지 상태 AMCL 위치 갱신 3회
+  → homepoint Nav2 이동 → 다시 AMCL 갱신 → 위치 4cm/방향 0.05rad 이내 검사
+  → 작업대 이동/집기/귀환/내려놓기 순서로 진행한다.
+  homepoint는 controller/waypoints.yaml에서 읽는다(현재 x=0,y=0,yaw=0).
+  Nav2 홈 전용 goal checker는 3cm/0.04rad를 사용하고 최종 검사는 4cm/0.05rad이다.
+  정밀도는 map/AMCL 추정값 기준이며 실제 바닥 위치의 절대 정밀도를 보증하지 않는다.
+  위치 추정 불확실성·정렬 실패·충돌·집기 실패 시에는 다음 작업을 자동 시작하지 않는다.
+  초기 위치 추정은 한 번만 전송하고, 홈 위치로 반복 재설정하여 보정값을 덮지 않는다.
+  start=current는 홈 정렬이 끝난 실제 추정 위치를 귀환점으로 저장한다.
+  --start homepoint 등 이름을 지정하면 기존처럼 해당 지점이 귀환점이다.
+  대기 중 YAML을 수정했다면 적용을 위해 실행기를 재시작한다.
+
+  로그: 파이 실행 루트 logs/mission-0001/, mission-0002/ ...
+  노트북에는 mission-request-0001.json, mission-request-0002.json ...을 저장한다.
+  홈 전용 controller/home_alignment.xml, 일반 이동 controller/navigation.xml을 함께 배포한다.
+  --once 외에는 성공 후 스택을 자동 종료하지 않는다. 오류/연결 상실 시에는 정리한다.
+  이번 변경은 오프라인으로 검증했으며 실물 기동·이동은 수행하지 않았다.
+
+Git 구성 수정(2026-11-27):
+  robot/so101-mobile-pick는 별도 Git 참조가 아닌 일반 소스 폴더로 포함한다.
+  소스 코드와 calibration은 상위 저장소가 직접 추적한다.
+  state, __pycache__, steps/logs, mission_control/runs는 Git에서 제외한다.
+  이전 내부 Git 이력은 Desktop의 pjt_soarm_turtlebot_git_backup_20261127_104225/soarm.git에 보관했다.

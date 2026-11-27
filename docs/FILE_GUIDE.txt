@@ -18,13 +18,18 @@ controller/robot_mission.py  파이 FSM·Nav2·접근/후진·팔 작업·안전
 controller/scan_self_filter.py 몸체 내부 라이다 반사점 제거
 controller/onboard_navigation.launch.py 파이 headless Nav2 기동
 controller/pick_place.py     팔 단독 pick→place (원본 arm_cli 호출)
-controller/test_robot_mission.py  실제 ROS/하드웨어 없는 55개 테스트
+controller/test_robot_mission.py  실제 ROS/하드웨어 없는 62개 테스트
 controller/*.yaml, *.pgm, *.rviz  현재 실행에 사용하는 지도·좌표·설정
 
 robot/so101-mobile-pick/     파이 소스/보정/이력 전체 보관본
 robot/ros_ws/source_snapshot.tar.gz LDS-03/TurtleBot3 빌드용 소스
-archive/                    이전 설정·실행 로그·정리 전 원본 스냅샷
 
 설치 payload에는 코드·보정값·드라이버 소스만 포함하며, 과거 state/runs/logs/Git는 제외한다.
 기존 보관본의 state는 당시 상태 기록이므로 새 설치 대상에 복사하지 않는다.
 기존 파이 ~/so101-mobile-pick와 ~/arm-venv는 자동 설치 대상으로 사용하지 않는다.
+
+반복 세션 변경:
+controller/home_alignment.xml: 홈 전용 goal checker를 선택하는 Nav2 행동 트리.
+controller/navigation.xml: 기존 재계획/복구를 유지하고 일반 goal checker를 명시한 행동 트리.
+controller/execute_robot.py: 기본 반복 입력, --once 1회 종료, q 종료.
+controller/robot_mission.py: 작업마다 홈 정렬, IDLE 유지, 작업별 로그 분리.

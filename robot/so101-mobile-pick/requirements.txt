@@ -1,0 +1,6 @@
+# 팔·카메라 코드 (lerobot 없이). 라즈베리파이: python3 -m venv ~/arm-venv && ~/arm-venv/bin/pip install -r requirements.txt
+numpy
+scipy
+opencv-python-headless
+feetech-servo-sdk   # import 이름 scservo_sdk (lerobot이 쓰는 것과 같은 패키지)
+pyserial

@@ -1,0 +1,10 @@
+workbench:
+  frame_id: map
+  x: -3.4
+  y: -0.47
+  yaw: -1.558
+homepoint:
+  frame_id: map
+  x: 0.0
+  y: 0.0
+  yaw: null
