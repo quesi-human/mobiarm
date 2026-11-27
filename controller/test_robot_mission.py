@@ -101,7 +101,7 @@ class FakeMission(worker.Mission):
 
 class MissionTests(unittest.TestCase):
     def test_nomotion_localization_requires_fresh_scan_and_low_uncertainty(self):
-        for mode in ('good','uncertain','stale'):
+        for mode in ('good','approximate','converging','uncertain','stale'):
             with self.subTest(mode=mode):
                 clock=[20.]
                 m=object.__new__(worker.Mission);m.amcl_pose=None
@@ -115,8 +115,9 @@ class MissionTests(unittest.TestCase):
                 def spin(*args,**kwargs):
                     clock[0]+=.1
                     covariance=[0.]*36
-                    covariance[0]=covariance[7]=.02 if mode=='uncertain' else .001
-                    covariance[35]=.001
+                    covariance[0]=covariance[7]=(.09 if mode=='uncertain' or
+                        (mode=='converging' and len(calls)<8) else (.15**2 if mode=='approximate' else .001))
+                    covariance[35]=math.radians(15)**2 if mode=='approximate' else .001
                     stamp=clock[0] if mode!='stale' else 1.
                     msg=SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(
                         sec=int(stamp),nanosec=int((stamp%1)*1e9))),
@@ -125,11 +126,11 @@ class MissionTests(unittest.TestCase):
                 m.rclpy=SimpleNamespace(spin_once=spin)
                 with patch.dict(sys.modules,{'std_srvs.srv':SimpleNamespace(Empty=SimpleNamespace(Request=lambda:object()))}), \
                      patch.object(worker.time,'monotonic',lambda:clock[0]),contextlib.redirect_stdout(io.StringIO()):
-                    if mode=='good':
+                    if mode in ('good','approximate','converging'):
                         m.refine_localization()
-                        self.assertEqual(len(calls),3)
+                        self.assertEqual(len(calls),8 if mode=='converging' else 3)
                     else:
-                        with self.assertRaises(RuntimeError):m.refine_localization()
+                        with self.assertRaises(worker.LocalizationNotReady):m.refine_localization()
 
     def test_home_alignment_failure_prevents_pick_navigation(self):
         mission=FakeMission(failure='ALIGNING_HOME')
@@ -151,10 +152,11 @@ class MissionTests(unittest.TestCase):
         self.assertIn(('RETURNING',aligned),mission.trace)
 
     def test_home_guard_does_not_use_pick_position_bypass(self):
+        worker.check_arrival(dict(HOME,x=.12,yaw=.15),HOME,position_limit=.15,yaw_limit=.20)
         with self.assertRaises(RuntimeError):
-            worker.check_arrival(dict(HOME,x=.05),HOME,position_limit=.04,yaw_limit=.05)
+            worker.check_arrival(dict(HOME,x=.16),HOME,position_limit=.15,yaw_limit=.20)
         with self.assertRaises(RuntimeError):
-            worker.check_arrival(dict(HOME,yaw=.06),HOME,position_limit=.04,yaw_limit=.05)
+            worker.check_arrival(dict(HOME,yaw=.21),HOME,position_limit=.15,yaw_limit=.20)
 
     def test_behavior_trees_select_unambiguous_goal_checkers(self):
         import xml.etree.ElementTree as ET
@@ -182,6 +184,8 @@ class MissionTests(unittest.TestCase):
                 commands.append(name)
             def run(self,name,argv,timeout):
                 commands.append(name)
+                if name=='mission-0001':
+                    raise worker.LocalizationNotReady('not converged yet')
                 return '[]' if name=='graph' else ''
             def check(self):
                 control.check()
@@ -808,6 +812,16 @@ class MissionTests(unittest.TestCase):
                 stream.write(line[10:] + '\n')
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(events.read(), [{'event': 'ready'}])
+
+    def test_localization_worker_exit_is_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager=worker.Processes(directory)
+            try:
+                with self.assertRaises(worker.LocalizationNotReady):
+                    manager.run('mission', [sys.executable, '-c', 'raise SystemExit(75)'], 5)
+                self.assertEqual(manager.entries, [])
+            finally:
+                manager.close()
 
     def test_remote_process_timeout_is_cleaned_up(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -21,6 +21,10 @@ PREFIX = '@@ROBOT_EVENT@@'
 COLORS = {'red', 'orange', 'yellow', 'green', 'blue', 'purple'}
 
 
+class LocalizationNotReady(RuntimeError):
+    """Recoverable localization failure; keep the stack available."""
+
+
 def event(kind, **fields):
     print(PREFIX + json.dumps({'event': kind, **fields}, ensure_ascii=False), flush=True)
 
@@ -311,6 +315,8 @@ class Processes:
             if entry[1] is process:
                 entry[2].close()
                 self.entries.remove(entry)
+        if process.returncode == 75:
+            raise LocalizationNotReady('위치 보정 미완료: 작업을 보류했습니다. 로그: '+str(path))
         if process.returncode:
             raise RuntimeError(f'{name} 실패({process.returncode}): {output[-3000:]}')
         return output
@@ -474,11 +480,16 @@ def run_stack(config, config_path):
             request_file.write_text(json.dumps(request, ensure_ascii=False))
             mission_config=Path(config_path).with_name(f'mission-config-{sequence:04d}.json')
             mission_config.write_text(json.dumps(dict(config,logs=str(Path(config['logs'])/f'mission-{sequence:04d}'))))
-            processes.run(f'mission-{sequence:04d}', ['/usr/bin/python3', '-u', script, '--mode', 'mission',
-                '--config', str(mission_config), '--request', str(request_file)],
-                config['nav_timeout'] * 3 + config['arm_timeout'] *
-                (4 if config.get('place_on_return') else 3) + config['timeout'] + 90)
-            event('mission_done',mission_id=sequence)
+            outcome='completed'
+            try:
+                processes.run(f'mission-{sequence:04d}', ['/usr/bin/python3', '-u', script, '--mode', 'mission',
+                    '--config', str(mission_config), '--request', str(request_file)],
+                    config['nav_timeout'] * 3 + config['arm_timeout'] *
+                    (4 if config.get('place_on_return') else 3) + config['timeout'] + 90)
+            except LocalizationNotReady as exc:
+                outcome='deferred'
+                event('localization_wait',message=str(exc))
+            event('mission_done',mission_id=sequence,outcome=outcome)
             if config.get('once',False):
                 return
             event('state',state='IDLE')
@@ -610,8 +621,10 @@ class Mission:
         from std_srvs.srv import Empty
         event('state',state='REFINING_LOCALIZATION')
         if not self.nomotion_client.wait_for_service(timeout_sec=5):
-            raise RuntimeError('AMCL 정지 위치 갱신 서비스 없음')
-        for _ in range(3):
+            raise LocalizationNotReady('AMCL 정지 위치 갱신 서비스 대기 중')
+        # Allow repeated sensor updates to converge; never reset the pose or
+        # bypass the uncertainty check just to let the mission move.
+        for attempt in range(30):
             started=time.monotonic()
             ros_started=self.nav.get_clock().now().nanoseconds/1e9
             future=self.nomotion_client.call_async(Empty.Request())
@@ -626,13 +639,20 @@ class Mission:
                             break
             else:
                 self.nomotion_client.remove_pending_request(future)
-                raise RuntimeError('AMCL 라이다 위치 갱신 시간 초과')
-        msg,_=self.amcl_pose
-        covariance=msg.pose.covariance
-        if (any(not math.isfinite(covariance[i]) or covariance[i]<0 for i in (0,7,35)) or
-                max(covariance[0],covariance[7])>.10**2 or covariance[35]>math.radians(10)**2):
-            raise RuntimeError('AMCL 위치 추정 불확실성이 큽니다. 맵/라이다/초기 위치를 확인하세요.')
-        event('localization_refined',covariance_xy=[covariance[0],covariance[7]],covariance_yaw=covariance[35])
+                raise LocalizationNotReady('AMCL 라이다 위치 갱신 대기 중')
+            covariance=self.amcl_pose[0].pose.covariance
+            valid=all(math.isfinite(covariance[i]) and covariance[i]>=0 for i in (0,7,35))
+            converged=(valid and max(covariance[0],covariance[7])<=.20**2
+                       and covariance[35]<=math.radians(20)**2)
+            if attempt>=2 and converged:
+                event('localization_refined',covariance_xy=[covariance[0],covariance[7]],
+                      covariance_yaw=covariance[35],updates=attempt+1)
+                return
+            if attempt%3==2:
+                event('localization_wait',updates=attempt+1,
+                      covariance_xy=[covariance[0],covariance[7]],covariance_yaw=covariance[35],
+                      message='정지 상태에서 라이다 위치 보정 재시도 중')
+        raise LocalizationNotReady('AMCL 위치 추정이 아직 불확실합니다. 이동을 보류하고 명령 대기를 유지합니다.')
 
     def on_footprint(self, msg):
         self.footprint_observation = (msg, time.monotonic())
@@ -870,8 +890,8 @@ class Mission:
         check_position = (state != 'NAVIGATING_TO_PICK' or
                           self.config.get('check_pick_position', False))
         distance, angle = check_arrival(actual, point, check_position,
-            position_limit=.04 if state=='ALIGNING_HOME' else .15,
-            yaw_limit=.05 if state=='ALIGNING_HOME' else .15)
+            position_limit=.15,
+            yaw_limit=.20 if state=='ALIGNING_HOME' else .15)
         event('arrived', distance_error_m=distance, yaw_error_rad=angle,
               position_check=check_position)
         return actual
@@ -1004,7 +1024,10 @@ class Mission:
         approach = float(self.config.get('pick_approach_distance', .10))
         if not math.isfinite(approach) or not 0 <= approach <= .30:
             raise ValueError('정밀 접근 거리 설정 오류')
-        current = self.localize()
+        try:
+            current = self.localize()
+        except RuntimeError as exc:
+            raise LocalizationNotReady('위치 추정 대기: '+str(exc)) from exc
         event('state', state='PREPARING')
         self.stationary()
         status = self.arm('status')
@@ -1013,7 +1036,10 @@ class Mission:
         self.arm('park')
         self.refine_localization()
         home=validate_point(self.config['home_pose'])
-        current=self.navigate(home,'ALIGNING_HOME')
+        try:
+            current=self.navigate(home,'ALIGNING_HOME')
+        except RuntimeError as exc:
+            raise LocalizationNotReady('홈 정렬 재시도 필요: '+str(exc)) from exc
         start = current if request['start'] == 'current' else request['start']
         self.navigate(request['destination'], 'NAVIGATING_TO_PICK')
         if approach:
@@ -1089,6 +1115,9 @@ def main():
         mission = Mission(config)
         try:
             mission.run(json.loads(args.request.read_text()))
+        except LocalizationNotReady as exc:
+            event('state', state='WAITING_FOR_LOCALIZATION', message=str(exc))
+            raise SystemExit(75)
         except BaseException as exc:
             event('state', state='ERROR', message=str(exc) or type(exc).__name__)
             if mission.current_goal is not None:

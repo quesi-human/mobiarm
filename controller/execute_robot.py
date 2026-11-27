@@ -201,12 +201,12 @@ def local_metadata(args):
                     observation['topic'] = '/scan_filtered'
     controller = parameters['controller_server']['ros__parameters']
     controller['home_goal_checker'] = {'plugin':'nav2_controller::SimpleGoalChecker',
-        'stateful':True, 'xy_goal_tolerance':.03, 'yaw_goal_tolerance':.04}
+        'stateful':True, 'xy_goal_tolerance':.12, 'yaw_goal_tolerance':.15}
     if 'home_goal_checker' not in controller.setdefault('goal_checker_plugins', ['general_goal_checker']):
         controller['goal_checker_plugins'].append('home_goal_checker')
     for name in controller.get('goal_checker_plugins', ['general_goal_checker']):
         checker = controller.get(name)
-        if isinstance(checker, dict):
+        if isinstance(checker, dict) and name != 'home_goal_checker':
             for key in ('xy_goal_tolerance', 'yaw_goal_tolerance'):
                 checker[key] = min(float(checker.get(key, .1)), .1)
     return mapping, image, parameters, rviz, points
@@ -279,8 +279,10 @@ class Events:
     def wait(self, wanted, manager, timeout):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if any(item['event'] == wanted for item in self.read()):
-                return
+            items = self.read()
+            for item in items:
+                if item['event'] == wanted:
+                    return item
             manager.check()
             time.sleep(.2)
         raise RuntimeError(f'{wanted} 대기 시간 초과')
@@ -448,7 +450,13 @@ def main():
             send({'type': 'mission', 'request': request})
             total = (args.timeout + args.nav_timeout * 3 +
                      args.arm_timeout * (4 if args.place_on_return else 3) + 120)
-            events.wait('mission_done', manager, total)
+            result = events.wait('mission_done', manager, total)
+            if result and result.get('outcome') == 'deferred':
+                print('위치 보정 미완료로 작업을 보류했습니다. 다음 명령 입력 시 다시 보정합니다.',flush=True)
+                if not args.once:
+                    continue
+                remote.wait(timeout=35)
+                return 0
             if args.once:
                 print('작업 완료. --once 설정으로 종료합니다.',flush=True)
                 remote.wait(timeout=35)
