@@ -21,8 +21,9 @@ class SessionExit(Exception):
     pass
 
 
-def shell_command(argv, domain, model, setup_file=None):
-    setup_file = setup_file or os.environ.get('PJT_SOARM_LOCAL_ENV')
+def shell_command(argv, domain, model, setup_file=None, *, use_local_env=True):
+    if setup_file is None and use_local_env:
+        setup_file = os.environ.get('PJT_SOARM_LOCAL_ENV')
     # -i passes Ubuntu .bashrc's interactive guard; --norc avoids double sourcing.
     return ['bash', '--norc', '-ic', 'source "$HOME/.bashrc"\n'
             + (f'source {shlex.quote(str(setup_file))} || exit $?\n' if setup_file else '') +
@@ -383,7 +384,7 @@ def main():
         worker, config_path = deploy(args, ssh, metadata, session)
         command = lambda mode: shell_command(['/usr/bin/python3', '-u', str(worker),
             '--mode', mode, '--config', str(config_path)], args.domain_id, args.model,
-            getattr(args, 'remote_env', None))
+            getattr(args, 'remote_env', None), use_local_env=False)
         print(ssh.run(command('check'), timeout=65), flush=True)
         if args.check:
             print('배포·의존성 확인 완료. bringup/Nav2/팔은 기동하지 않았습니다.')

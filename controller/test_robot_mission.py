@@ -749,6 +749,26 @@ class MissionTests(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout), ['sourced', argument])
             self.assertFalse((root / 'SHOULD_NOT_EXIST').exists())
 
+    def test_remote_shell_never_inherits_laptop_setup_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.bashrc').write_text('export ROBOT_TEST=remote_bashrc\n')
+            remote_env = root / 'pi env.sh'
+            remote_env.write_text('export ROBOT_TEST=remote_setup\n')
+            laptop_env = str(root / 'missing-laptop/setup_env.sh')
+            code = 'import os; print(os.environ["ROBOT_TEST"])'
+            with patch.dict(os.environ, PJT_SOARM_LOCAL_ENV=laptop_env):
+                local = cli.shell_command([sys.executable, '-c', code], 36, 'waffle_pi')
+                self.assertIn(laptop_env, local[-1])
+                for setup_file, expected in ((None, 'remote_bashrc'),
+                                             (remote_env, 'remote_setup')):
+                    command = cli.shell_command([sys.executable, '-c', code], 36,
+                        'waffle_pi', setup_file, use_local_env=False)
+                    self.assertNotIn(laptop_env, command[-1])
+                    result = subprocess.run(command, env=dict(os.environ, HOME=directory),
+                        capture_output=True, text=True, check=True)
+                    self.assertEqual(result.stdout.strip(), expected)
+
     def test_remote_upload_uses_relative_image_reference(self):
         import yaml
         class FakeSSH:
@@ -900,7 +920,7 @@ class MissionTests(unittest.TestCase):
             metadata = ({}, Path('image'), {}, Path('rviz'), {'workbench': POINT})
             argv = ['execute_robot.py', '--start', 'current',
                     '--destination', 'workbench', '--color', 'red','--once']
-            def fake_shell(argv, domain, model, setup_file=None):
+            def fake_shell(argv, domain, model, setup_file=None, **kwargs):
                 if argv[:4] == ['ros2', 'run', 'rviz2', 'rviz2']:
                     return [sys.executable, str(rviz)]
                 return argv
