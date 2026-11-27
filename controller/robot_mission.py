@@ -51,6 +51,9 @@ def validate_point(point):
 
 
 def validate_request(request):
+    if request.get('navigate_only') is True:
+        validate_point(request['destination'])
+        return request
     if request.get('color') not in COLORS:
         raise ValueError('지원하지 않는 블록 색상입니다.')
     validate_point(request['destination'])
@@ -1144,6 +1147,10 @@ class Mission:
         if status.get('holding'):
             raise RuntimeError('팔이 이미 블록을 보유 중입니다. 기존 작업을 먼저 확인하세요.')
         self.arm('park')
+        if request.get('navigate_only'):
+            self.navigate(request['destination'],'NAVIGATING_ONLY')
+            event('state',state='DONE',mode='navigate_only')
+            return
         start = current if request['start'] == 'current' else request['start']
         self.navigate(request['destination'], 'NAVIGATING_TO_PICK')
         if approach:

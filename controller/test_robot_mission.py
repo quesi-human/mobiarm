@@ -542,6 +542,26 @@ class MissionTests(unittest.TestCase):
     def request(self, start='current'):
         return {'start': start, 'destination': dict(POINT), 'color': 'yellow'}
 
+    def test_navigate_only_skips_pick_approach_return_and_place(self):
+        mission=FakeMission(place=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            mission.run({'navigate_only':True,'destination':dict(POINT)})
+        self.assertEqual(mission.trace,['localize','stopped',('status',None),
+            ('park',None),('NAVIGATING_ONLY',POINT)])
+
+    def test_navigation_options_do_not_require_start_or_color(self):
+        defaults=argparse.Namespace(start='unknown',destination='workbench',color='invalid')
+        args=cli.parse_task_options('--navigate-only --destination homepoint',defaults)
+        with contextlib.redirect_stdout(io.StringIO()):
+            request=cli.collect_request(args,{'homepoint':HOME})
+        self.assertTrue(request['navigate_only'])
+        self.assertEqual(request['destination'],HOME)
+        self.assertNotIn('start',request)
+        self.assertNotIn('color',request)
+        with self.assertRaises(ValueError):
+            worker.validate_request({'navigate_only':True,'destination':dict(HOME,yaw=float('nan'))})
+        self.assertFalse(cli.parse_task_options('--color red',defaults).navigate_only)
+
     def test_pick_then_return_without_unrequested_place(self):
         mission = FakeMission()
         with contextlib.redirect_stdout(io.StringIO()):

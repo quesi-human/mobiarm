@@ -1,6 +1,98 @@
 soARM + TurtleBot — 자동 분할 설치 프로젝트
 Ubuntu 22.04 / ROS 2 Humble / TurtleBot3 Waffle Pi + LDS-03
 
+실행 명령어 모음 — 아래 명령은 별도 표시가 없으면 노트북 터미널에서 실행
+
+  먼저 프로젝트 폴더로 이동:
+  cd ~/Desktop/pjt_soarm_turtlebot
+
+  A. 작업대의 노란 블록 집기 → 홈 귀환 → 내려놓기 → 다음 명령 대기
+  python3 execute_robot.py --start homepoint --destination workbench --color yellow
+
+  B. 같은 작업을 한 번만 하고 전체 프로세스 종료
+  python3 execute_robot.py --start homepoint --destination workbench --color yellow --once
+
+  C. 현재 위치를 귀환점으로 기록 → 작업대의 빨간 블록 집기 → 귀환·내려놓기
+  python3 execute_robot.py --start current --destination workbench --color red
+
+  D. 작업대로 이동만 수행 → 다음 명령 대기
+  python3 execute_robot.py --navigate-only --destination workbench
+
+  E. 홈으로 이동만 수행 → 종료 (실제 로봇이 작업대에서 출발하는 예)
+  python3 execute_robot.py --initial-waypoint workbench --navigate-only --destination homepoint --once
+
+  F. RViz 없이 노란 블록 미션 수행
+  python3 execute_robot.py --start homepoint --destination workbench --color yellow --no-rviz
+
+  G. 집기 전 10cm 접근·집기 후 후진을 생략하고 미션 수행
+  python3 execute_robot.py --start homepoint --destination workbench --color yellow --pick-approach-distance 0
+
+  H. 파이 bringup이 이미 실행 중일 때 재사용 (중복 기동 금지)
+  python3 execute_robot.py --reuse-bringup --start homepoint --destination workbench --color yellow
+  기존 Nav2와 scan_self_filter는 종료한 상태여야 한다.
+  --reuse-nav2는 현재 자기 몸체 필터 구성에서 사용할 수 없다.
+
+  I. SSH 배포·의존성 확인만 수행 (이동·팔·카메라·ROS 노드 기동 없음)
+  python3 execute_robot.py --check --no-rviz
+
+  J. SSH 접속도 하지 않고 실행 계획만 확인
+  python3 execute_robot.py --dry-run --start homepoint --destination workbench --color yellow
+  python3 execute_robot.py --dry-run --navigate-only --destination homepoint
+
+대기 상태에서 다음 작업 입력
+
+  정상 완료 후 '다음 작업 옵션>'가 보이면 아래 옵션만 한 줄로 입력한다.
+  python3 execute_robot.py를 다시 입력하거나 별도 실행기를 중복 기동하지 않는다.
+
+  빨간 블록 집기·홈 귀환:
+  --start homepoint --destination workbench --color red
+
+  작업대로 이동만:
+  --navigate-only --destination workbench
+
+  홈으로 이동만:
+  --navigate-only --destination homepoint
+
+  같은 목적지·귀환점에서 색상만 변경:
+  --color blue
+
+  종료:
+  q
+
+  대기 중 허용 옵션: --start, --destination(별칭 --target), --color, --navigate-only.
+  지점·색상 생략 시 직전 명령이 아니라 최초 실행 옵션을 사용한다.
+  최초 실행에서도 생략했다면 current / workbench / red가 기본값이다.
+  --navigate-only는 각 명령마다 명시한다. 생략하면 집기·귀환 미션이다.
+  --once, --no-rviz, --initial-waypoint, --pick-approach-distance 등은 최초 실행 전용이다.
+  q/quit/exit/종료는 명령 대기 중 종료이며, 동작 중 취소는 Ctrl+C이다.
+  동작 중에는 다음 명령을 입력하지 말고 완료 후 프롬프트를 기다린다.
+
+옵션 의미와 초기 위치
+
+  --destination workbench : 블록을 집을 장소. --navigate-only가 있을 때는 이동 목적지.
+  --start homepoint       : 집기를 마친 뒤 돌아와 내려놓을 곳. 출발 이동 명령이 아니다.
+  --start current         : 이번 작업 시작 때 추정된 위치·방향을 귀환점으로 사용.
+  --color yellow          : 집을 블록 색상. 이동 전용에서는 사용하지 않는다.
+  --navigate-only         : 목적지 이동 후 완료. 집기·접근·귀환·내려놓기를 수행하지 않는다.
+                            이동 전 팔 접힘·빈손 확인과 Nav2 충돌·도착 검사는 유지한다.
+  --initial-waypoint NAME : 실행 시 AMCL에 전송할 실제 시작 위치·방향. 기본 homepoint.
+                            로봇을 이 지점으로 이동시키는 옵션이 아니다.
+  --once                  : 첫 작업 완료 후 세션 종료. 기본은 다음 명령 대기.
+  --pick-approach-distance : 집기 전 전진 거리(m), 기본 0.10. 0이면 전후진 생략.
+
+  중요: 실제 로봇은 --initial-waypoint로 지정한 위치·방향에 놓고 실행한다.
+  예를 들어 작업대에 있는 로봇을 홈으로 이동하려면 위 E 명령을 사용한다.
+  --start를 workbench로 바꾸는 것만으로 초기 위치가 바뀌지는 않는다.
+  추가 정지 라이다 보정/홈 선행 정렬 기능은 제거했으며, Nav2 기본 AMCL은 유지한다.
+  동일 세션의 다음 명령에서는 초기 좌표를 다시 전송하지 않는다.
+
+  등록 지점: controller/waypoints.yaml
+    homepoint: x=0.0, y=0.0, yaw=0.0
+    workbench: x=-3.4, y=-0.77, yaw=-1.558
+  위치 단위는 m, yaw는 rad이며 높이가 아니라 로봇의 평면 방향이다.
+  색상: blue, green, orange, purple, red, yellow (한글 색상도 지원).
+  waypoint를 수정하면 실행기를 재시작해야 반영된다.
+
 1. 노트북과 파이를 한 번에 설치
 
   cd /home/ssafy/Desktop/pjt_soarm_turtlebot
@@ -87,8 +179,8 @@ Ubuntu 22.04 / ROS 2 Humble / TurtleBot3 Waffle Pi + LDS-03
 
   실험 설정 check_pick_position: false는 작업대 위치 추가 검사만 생략한다.
   Nav2 성공·정지·yaw·충돌 검사와 귀환 위치 검사는 유지한다.
-  homepoint 부근에 로봇을 놓으면 초기 추정 후 라이다로 보정하고 홈으로 실제 이동한다.
-  이는 홈 근처의 작은 수동 배치 오차 보정용이며, 임의 장소에서의 전역 위치 인식은 아니다.
+  실제 시작 위치·방향에 맞는 --initial-waypoint를 지정한다.
+  별도 홈 선행 이동·정지 라이다 보정은 하지 않는다.
 
 8. 새 파이 설치 경로에서 팔 단독 실행
 
@@ -134,7 +226,7 @@ Ubuntu 22.04 / ROS 2 Humble / TurtleBot3 Waffle Pi + LDS-03
 
   로그: 파이 실행 루트 logs/mission-0001/, mission-0002/ ...
   노트북에는 mission-request-0001.json, mission-request-0002.json ...을 저장한다.
-  홈 전용 controller/home_alignment.xml, 일반 이동 controller/navigation.xml을 함께 배포한다.
+  일반 이동용 controller/navigation.xml을 배포한다. home_alignment.xml은 현재 사용하지 않는다.
   --once 외에는 성공 후 스택을 자동 종료하지 않는다. 오류/연결 상실 시에는 정리한다.
   이번 변경은 오프라인으로 검증했으며 실물 기동·이동은 수행하지 않았다.
 
@@ -149,7 +241,7 @@ Git 구성 수정(2026-11-27):
   기본 Nav2 후진이 실패하면 취소·정지 확인 후 오도메트리로 진행 거리를 검사한다.
   목표 거리 미달 시 5cm씩 최대 3회 추가 후진한다(속도 0.03m/s).
   추가 후진에만 Nav2 코스트맵 충돌 검사를 우회한다. 자동 전진/주행은 기존 검사를 유지한다.
-  오도메트리 갱신 중단, 2초간 진전 없음, 방향·옆밀림 오차 시 정지·작업 보류한다.
+  오도메트리 갱신 중단, 2초간 진전 없음, 방향·옆밀림 오차 시 정지한다.
   최종 실패 시 아래 실패 정리 절차를 수행한 뒤 세션을 종료한다.
 
 12. 동작 실패 정리
@@ -162,3 +254,11 @@ Git 구성 수정(2026-11-27):
   복구 이동/통신/토크 해제 확인 실패는 arm_recovery_failed로 기록하고 종료한다.
   park 확인 실패 시 펼쳐진 팔의 강제 토크 OFF를 수행하지 않는다.
   Ctrl+C·제어 연결 강제 종료는 정지 경로이며 새 복구 이동을 시작하지 않는다.
+
+13. 이동 전용 명령
+
+  python3 execute_robot.py --navigate-only --destination workbench
+  목적지로 이동한 뒤 다음 명령 대기. --once 추가 시 이동 후 종료한다.
+  대기 중 입력: --navigate-only --destination homepoint
+  --navigate-only는 각 명령마다 지정한다. 생략하면 기존 집기 작업이다.
+  --start/--color는 이동 전용에서 사용하지 않는다. 이동 전 팔 접힘 확인은 유지한다.

@@ -128,6 +128,7 @@ def parse_args():
     p.set_defaults(manual_initial_pose=False)
     p.add_argument('--destination', '--target', dest='destination', help='집기 지점 이름')
     p.add_argument('--color', help='블록 색상 (한글/영문)')
+    p.add_argument('--navigate-only', action='store_true', help='목적지로 이동만 수행(집기·귀환·내려놓기 생략)')
     p.add_argument('--place-on-return', action=argparse.BooleanOptionalAction, default=True,
                    help='귀환 후 내려놓기(기본); --no-place-on-return이면 운반 자세 유지')
     p.add_argument('--reuse-bringup', action='store_true')
@@ -302,12 +303,14 @@ def collect_request(args, points, ask=None):
         '초록': 'green', '초록색': 'green', '주황': 'orange', '주황색': 'orange',
         '보라': 'purple', '보라색': 'purple'}
     print('등록 지점: ' + ', '.join(points) + ' / current = 현재 위치를 귀환점으로 기록')
-    print('색상: red(빨강), yellow(노랑), blue(파랑), green(초록), orange(주황), purple(보라)')
+    navigate_only=bool(getattr(args,'navigate_only',False))
+    if not navigate_only:
+        print('색상: red(빨강), yellow(노랑), blue(파랑), green(초록), orange(주황), purple(보라)')
     start = args.start or 'current'
     destination = args.destination or 'workbench'
     color = args.color or 'red'
     color = aliases.get(color.strip().lower(), color.strip().lower())
-    if color not in COLORS:
+    if not navigate_only and color not in COLORS:
         raise ValueError('색상: ' + ', '.join(sorted(COLORS)))
 
     def point(name):
@@ -318,6 +321,10 @@ def collect_request(args, points, ask=None):
             if data.get(key) is None:
                 raise ValueError(f'{name}.{key} 미등록: waypoints.yaml에 좌표·방향을 먼저 저장하세요.')
         return validate_point(data)
+
+    if navigate_only:
+        request={'navigate_only':True,'destination_name':destination,'destination':point(destination)}
+        return validate_request(request)
 
     request = {'start_name': start, 'destination_name': destination,
         'start': 'current' if start == 'current' else point(start),
@@ -336,6 +343,7 @@ def parse_task_options(line, defaults):
     parser.add_argument('--destination', '--target', dest='destination',
                         default=defaults.destination or 'workbench')
     parser.add_argument('--color', default=defaults.color or 'red')
+    parser.add_argument('--navigate-only',action='store_true')
     if not line.strip():
         raise ValueError('다음 작업 옵션을 입력하세요. 예: --start homepoint --destination workbench --color yellow')
     return parser.parse_args(shlex.split(line))
@@ -366,11 +374,14 @@ def main():
         print(f'파이 {args.host}: source ~/.bashrc → bringup → Nav2(headless) → 집기·귀환 FSM')
         print('노트북: source ~/.bashrc → RViz → 실행 옵션으로 첫 작업 → 완료 후 다음 작업 옵션 대기')
         print('초기 위치: ' + ('RViz 수동 지정' if args.manual_initial_pose else args.initial_waypoint + ' 자동 지정'))
-        print(f'집기 접근: 도착 확인 → 정면 {args.pick_approach_distance*100:g}cm 전진 → '
-              f'집기·운반 자세 확인 → {args.pick_approach_distance*100:g}cm 후진 → 귀환')
-        print('초기 좌표 설정 후 작업대로 이동. 완료 후 다음 명령 대기(--once는 종료). 귀환 후 ' +
-              ('내려놓고 팔을 접습니다.' if args.place_on_return else '블록을 운반 자세로 유지합니다.'))
-        if args.start or args.destination or args.color:
+        if args.navigate_only:
+            print('이동 전용: 팔 접힘 확인 → 목적지 이동 → 다음 명령 대기(--once는 종료)')
+        else:
+            print(f'집기 접근: 도착 확인 → 정면 {args.pick_approach_distance*100:g}cm 전진 → '
+                  f'집기·운반 자세 확인 → {args.pick_approach_distance*100:g}cm 후진 → 귀환')
+            print('초기 좌표 설정 후 작업대로 이동. 완료 후 다음 명령 대기(--once는 종료). 귀환 후 ' +
+                  ('내려놓고 팔을 접습니다.' if args.place_on_return else '블록을 운반 자세로 유지합니다.'))
+        if args.navigate_only or args.start or args.destination or args.color:
             import yaml
             request = collect_request(args, yaml.safe_load(args.waypoints.expanduser().read_text()), input)
             print(json.dumps(request, ensure_ascii=False, indent=2))
@@ -456,8 +467,11 @@ def main():
                 continue
             count+=1
             (logs / f'mission-request-{count:04d}.json').write_text(json.dumps(request, ensure_ascii=False, indent=2))
-            print(f"실행: {request['destination_name']}에서 "
-                  f"{request['color']} 집기 → {request['start_name']} 귀환", flush=True)
+            if request.get('navigate_only'):
+                print(f"실행: {request['destination_name']}로 이동만 수행",flush=True)
+            else:
+                print(f"실행: {request['destination_name']}에서 "
+                      f"{request['color']} 집기 → {request['start_name']} 귀환", flush=True)
             send({'type': 'mission', 'request': request})
             total = (args.timeout + args.nav_timeout * 3 +
                      args.arm_timeout * (4 if args.place_on_return else 3) + 120)
