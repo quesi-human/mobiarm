@@ -224,6 +224,7 @@ def deploy(args, ssh, metadata, session):
     ssh.upload(directory / 'onboard_navigation.launch.py',
                Path(__file__).with_name('onboard_navigation.launch.py').read_bytes())
     ssh.upload(directory / 'navigation.xml', Path(__file__).with_name('navigation.xml').read_bytes())
+    ssh.upload(directory / 'camera_recovery.py', Path(__file__).with_name('camera_recovery.py').read_bytes())
     ssh.upload(directory / 'map.pgm', image.read_bytes())
     ssh.upload(directory / 'map.yaml', yaml.safe_dump(dict(mapping, image='map.pgm')).encode())
     ssh.upload(directory / 'nav2_params.yaml', yaml.safe_dump(parameters).encode())
@@ -232,6 +233,7 @@ def deploy(args, ssh, metadata, session):
         'params_file': str(directory / 'nav2_params.yaml'), 'logs': str(directory / 'logs'),
         'arm_python': str(getattr(args, 'remote_arm_python', None) or Path(home) / 'arm-venv/bin/python'),
         'arm_cli': str(project / 'arm_cli.py'),
+        'camera_recovery': str(directory/'camera_recovery.py'),
         'timeout': args.timeout, 'nav_timeout': args.nav_timeout, 'arm_timeout': args.arm_timeout,
         'reuse_bringup': args.reuse_bringup, 'reuse_nav2': args.reuse_nav2,
         'place_on_return': args.place_on_return,

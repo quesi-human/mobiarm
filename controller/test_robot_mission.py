@@ -20,6 +20,7 @@ import robot_mission as worker
 import scan_self_filter as self_filter
 import math
 import pick_place
+import camera_recovery
 
 POINT = {'frame_id': 'map', 'x': -3.4, 'y': -.47, 'yaw': -1.558}
 HOME = {'frame_id': 'map', 'x': 0., 'y': 0., 'yaw': 0.}
@@ -103,6 +104,141 @@ class FakeMission(worker.Mission):
 
 
 class MissionTests(unittest.TestCase):
+    def test_kernel_stuck_process_cannot_block_cleanup_forever(self):
+        def wait(timeout):
+            self.assertEqual(timeout,1)
+            raise subprocess.TimeoutExpired('stuck',timeout)
+        process=SimpleNamespace(pid=999999,wait=wait)
+        with patch.object(worker.os,'killpg',side_effect=ProcessLookupError()),              contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(worker.stop_group(process))
+
+    def test_camera_cleanup_targets_only_orphaned_project_owners(self):
+        info={'pid':999999,'uid':os.getuid(),'ppid':1,'state':'S',
+              'cwd':'/tmp/project','cmd':'python -c install_park_guard arm_cli.main() pick'}
+        self.assertTrue(camera_recovery.is_stale_owner(info,'/tmp/project'))
+        for change in ({'ppid':123},{'uid':os.getuid()+1},{'cwd':'/tmp/other'},
+                       {'cmd':'python another_camera_app.py'},{'pid':os.getpid()}):
+            self.assertFalse(camera_recovery.is_stale_owner(dict(info,**change),'/tmp/project'))
+
+    def test_camera_preflight_cleans_then_verifies_owner_disappearance(self):
+        stale={'pid':999999,'uid':os.getuid(),'ppid':1,'state':'S','cwd':'/tmp/project',
+               'cmd':'python arm_cli.py pick'}
+        with patch.object(camera_recovery,'camera_owners',side_effect=[[stale],[]]),              patch.object(camera_recovery,'stop_stale_owner') as stop,contextlib.redirect_stderr(io.StringIO()):
+            camera_recovery.prepare_camera('/fake/video0','/tmp/project')
+        stop.assert_called_once_with(stale)
+        with patch.object(camera_recovery,'camera_owners',return_value=[dict(stale,ppid=123)]),              patch.object(camera_recovery,'stop_stale_owner') as stop,contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError,'활성 프로세스'):
+                camera_recovery.prepare_camera('/fake/video0','/tmp/project')
+        stop.assert_not_called()
+
+    def test_fast_capture_skips_matching_settings_and_limits_warmup(self):
+        for needs_config in (False,True):
+            with self.subTest(needs_config=needs_config):
+                clock=[0.];writes=[];reads=[];released=[]
+                values={1:123,2:1280 if needs_config else 640,3:720 if needs_config else 480}
+                def set_value(prop,value):writes.append((prop,value));values[prop]=value;return True
+                def read():clock[0]+=.04;reads.append(True);return True,object()
+                cap=SimpleNamespace(isOpened=lambda:True,get=lambda prop:values[prop],
+                    set=set_value,read=read,release=lambda:released.append(True))
+                cv=SimpleNamespace(setNumThreads=lambda n:None,CAP_V4L2=200,
+                    CAP_PROP_FOURCC=1,CAP_PROP_FRAME_WIDTH=2,CAP_PROP_FRAME_HEIGHT=3,
+                    VideoWriter_fourcc=lambda *args:123,VideoCapture=lambda *args:cap)
+                cam=SimpleNamespace(index=0,size=(640,480,30),fourcc='MJPG',cap=None)
+                with patch.dict(sys.modules,{'cv2':cv}),patch.object(camera_recovery.time,'monotonic',lambda:clock[0]),                      contextlib.redirect_stderr(io.StringIO()):camera_recovery.fast_start(cam)
+                self.assertEqual(writes,[(2,640),(3,480)] if needs_config else [])
+                self.assertEqual(len(reads),5)
+                self.assertEqual(released,[])
+
+    def test_camera_process_pid_reuse_is_not_killed(self):
+        owner={'pid':999999,'start':'old'}
+        with patch.object(camera_recovery,'process_info',return_value={'start':'new','state':'S'}),              patch.object(camera_recovery.os,'kill') as kill:
+            camera_recovery.stop_stale_owner(owner)
+        kill.assert_not_called()
+
+    def test_camera_retry_is_limited_to_pre_motion_startup_failures(self):
+        result={'ok':False,'holding':False,'error':'RuntimeError: 카메라 10초 동안 응답 없음'}
+        opening='[준비] 손목 카메라 여는 중 (/dev/video0)'
+        self.assertTrue(worker.camera_start_failed(result,opening))
+        self.assertFalse(worker.camera_start_failed(result,opening+'\n[준비] 카메라 열림'))
+        self.assertFalse(worker.camera_start_failed(dict(result,holding=True),opening))
+        self.assertFalse(worker.camera_start_failed(dict(result,error='too_far'),opening))
+        self.assertFalse(worker.camera_start_failed(result,''))
+
+    def test_pick_camera_start_retries_in_fresh_attempts_then_succeeds(self):
+        m=object.__new__(worker.Mission);m.arm_process=None
+        attempts=[];pauses=[]
+        def once(command,color,attempt):
+            attempts.append(attempt)
+            if attempt<3:raise worker.CameraStartupError('camera unavailable')
+            return {'ok':True,'holding':True,'pose':'carry','result':'picked'}
+        m._arm_once=once;m.camera_retry_pause=lambda:pauses.append(True)
+        with contextlib.redirect_stdout(io.StringIO()):result=m.arm('pick','yellow')
+        self.assertEqual(attempts,[1,2,3]);self.assertEqual(len(pauses),2)
+        self.assertTrue(result['holding'])
+
+    def test_pick_camera_failure_stops_after_three_attempts(self):
+        m=object.__new__(worker.Mission);m.arm_process=None
+        attempts=[]
+        def once(command,color,attempt):
+            attempts.append(attempt);raise worker.CameraStartupError('timeout')
+        m._arm_once=once;m.camera_retry_pause=lambda:None
+        with contextlib.redirect_stdout(io.StringIO()),self.assertRaisesRegex(RuntimeError,'카메라 시작 3회 실패'):
+            m.arm('pick','red')
+        self.assertEqual(attempts,[1,2,3])
+
+    def test_pick_never_retries_search_or_motion_failures(self):
+        m=object.__new__(worker.Mission);m.arm_process=None
+        attempts=[]
+        def once(command,color,attempt):
+            attempts.append(attempt);raise RuntimeError('too_far')
+        m._arm_once=once;m.camera_retry_pause=lambda:self.fail('unexpected retry')
+        with self.assertRaisesRegex(RuntimeError,'too_far'):m.arm('pick','red')
+        self.assertEqual(attempts,[1])
+
+    def test_pick_retry_waits_for_old_process_exit(self):
+        m=object.__new__(worker.Mission)
+        process=SimpleNamespace(poll=lambda:0)
+        m.arm_process=process
+        trace=[]
+        def once(command,color,attempt):
+            if attempt==1:raise worker.CameraStartupError('driver hung')
+            self.assertIsNone(m.arm_process)
+            trace.append('next_process');return {'ok':True}
+        m._arm_once=once;m.camera_retry_pause=lambda:trace.append('pause')
+        with patch.object(worker,'stop_group',side_effect=lambda *a,**kw:trace.append('stop_old')),              contextlib.redirect_stdout(io.StringIO()):m.arm('pick','yellow')
+        self.assertEqual(trace,['stop_old','pause','next_process'])
+
+    def test_startup_init_plans_before_torque_and_moves_before_reset(self):
+        trace=[]
+        tasks=SimpleNamespace(holding=False,park_q={'joint':0},kin=object())
+        tasks.arm=SimpleNamespace(read_deg=lambda:{'joint':30},torque_on=lambda:trace.append('torque_on'))
+        tasks._stop=SimpleNamespace(clear=lambda:trace.append('clear_stop'))
+        tasks._goto_joint=lambda target,name:trace.append(('move',target,name))
+        park=SimpleNamespace(near_park=lambda *args:False,
+            park_target=lambda *args:{'joint':0},plan=lambda *args:trace.append('plan'))
+        def reset(*args,**kwargs):
+            trace.append(('reset',kwargs['gripper_pct']))
+            return {'ok':True,'cmd':'recover','result':'initialized'}
+        with patch.object(worker,'reset_arm_tasks',side_effect=reset):
+            result=worker.initialize_arm_tasks(tasks,park)
+        self.assertEqual(trace,['plan','torque_on','clear_stop',('move',{'joint':0},'park'),('reset',3)])
+        self.assertEqual(result['cmd'],'init')
+
+    def test_startup_init_rejects_unplannable_pose_before_torque_on(self):
+        tasks=SimpleNamespace(holding=False,park_q={},kin=object())
+        tasks.arm=SimpleNamespace(read_deg=lambda:{},torque_on=lambda:self.fail('unsafe torque on'))
+        def blocked(*args):raise RuntimeError('no collision-free path')
+        park=SimpleNamespace(near_park=lambda *args:False,park_target=lambda *args:{},plan=blocked)
+        with self.assertRaisesRegex(RuntimeError,'no collision-free path'):
+            worker.initialize_arm_tasks(tasks,park)
+
+    def test_startup_init_failure_prevents_base_navigation(self):
+        mission=FakeMission(failure='init')
+        with contextlib.redirect_stdout(io.StringIO()),self.assertRaisesRegex(RuntimeError,'init failed'):
+            mission.run(self.request())
+        self.assertNotIn(('NAVIGATING_TO_PICK',POINT),mission.trace)
+        self.assertNotIn(('pick','yellow'),mission.trace)
+
     def test_failure_reset_parks_releases_verifies_torque_and_resets_state(self):
         for holding in (False,True):
             with self.subTest(holding=holding):
@@ -547,7 +683,7 @@ class MissionTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             mission.run({'navigate_only':True,'destination':dict(POINT)})
         self.assertEqual(mission.trace,['localize','stopped',('status',None),
-            ('park',None),('NAVIGATING_ONLY',POINT)])
+            ('init',None),('NAVIGATING_ONLY',POINT)])
 
     def test_navigation_options_do_not_require_start_or_color(self):
         defaults=argparse.Namespace(start='unknown',destination='workbench',color='invalid')
@@ -567,7 +703,7 @@ class MissionTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             mission.run(self.request())
         self.assertEqual(mission.trace, ['localize', 'stopped', ('status', None),
-            ('park', None),
+            ('init', None),
             ('NAVIGATING_TO_PICK', POINT), ('pick_footprint', True),
             ('APPROACHING_PICK', .1), ('pick', 'yellow'), ('RETREATING_FROM_PICK', -.1),
             ('pick_footprint', False), ('RETURNING', HOME)])
@@ -991,14 +1127,19 @@ class MissionTests(unittest.TestCase):
                 (root / 'robot/arm.py').write_text('class ArmStop(RuntimeError): pass\n')
                 (root / 'robot/tasks.py').write_text('class ArmTasks:\n    def park(self): pass\n')
                 (root / 'robot/park.py').write_text('def near_park(actual,expected): return True\n')
+                (root/'fake-video').touch()
+                (root/'robot/devices.py').write_text('WRIST_CAM='+repr(str(root/'fake-video'))+'\n')
+                (root/'vision').mkdir()
+                (root/'vision/__init__.py').write_text('')
+                (root/'vision/camera.py').write_text('class UsbCamera: pass\n')
                 result = {'ok': True, 'result': 'picked', 'holding': carrying, 'pose': 'carry'}
                 (root / 'arm_cli.py').write_text(
-                    'import json,sys\ndef main():\n'
+                    'import json,sys\nfrom pathlib import Path\nROOT=Path(__file__).parent\ndef main():\n'
                     '    assert sys.argv[1:] == ["pick", "--color", "red"]\n'
                     '    print(' + repr(json.dumps(result)) + ')\n')
                 mission = worker.Mission.__new__(worker.Mission)
                 mission.config = {'arm_python': sys.executable, 'arm_cli': str(root/'arm_cli.py'),
-                                  'arm_timeout': 5}
+                                  'arm_timeout': 5,'camera_recovery':str(Path(camera_recovery.__file__))}
                 mission.log_root = root
                 mission.nav = object()
                 mission.arm_process = None

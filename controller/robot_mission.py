@@ -25,6 +25,17 @@ class LocalizationNotReady(RuntimeError):
     """Recoverable localization failure; keep the stack available."""
 
 
+class CameraStartupError(RuntimeError):
+    pass
+
+
+def camera_start_failed(result, log):
+    return (result.get('ok') is False and result.get('holding') is False
+            and '카메라' in str(result.get('error',''))
+            and '[준비] 손목 카메라 여는 중' in log
+            and '[준비] 카메라 열림' not in log)
+
+
 def event(kind, **fields):
     print(PREFIX + json.dumps({'event': kind, **fields}, ensure_ascii=False), flush=True)
 
@@ -231,7 +242,13 @@ def stop_group(process, graces=(8, 3, 1)):
         else:
             continue
         break
-    process.wait()
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        event('process_stop_failed',pid=process.pid,
+              message='SIGKILL 후에도 종료되지 않음: 커널/USB 응답 확인 필요')
+        return False
+    return True
 
 
 class Control:
@@ -345,7 +362,7 @@ def dependencies(config):
     for key in ('map', 'params_file', 'arm_python', 'arm_cli', 'navigation_launch'):
         if not Path(config[key]).is_file():
             raise RuntimeError(f'{key} 파일 없음: {config[key]}')
-    for key in ('home_behavior_tree','normal_behavior_tree'):
+    for key in ('home_behavior_tree','normal_behavior_tree','camera_recovery'):
         if config.get(key) and not Path(config[key]).is_file():
             raise RuntimeError(f'{key} 파일 없음: {config[key]}')
     if config.get('scan_filter') and not Path(config['scan_filter']).is_file():
@@ -554,7 +571,7 @@ def install_park_guard(tasks_class, near_park, stop_error):
     tasks_class.park = checked_park
 
 
-def reset_arm_tasks(tasks, near_park):
+def reset_arm_tasks(tasks, near_park, gripper_pct=45):
     """Return to recorded park, release the object, then reset all torque."""
     if tasks.park_q is None:
         raise RuntimeError('실패 복구용 park 자세가 없습니다.')
@@ -563,7 +580,7 @@ def reset_arm_tasks(tasks, near_park):
     if not near_park(tasks.arm.read_deg(), tasks.park_q):
         raise RuntimeError('실패 복구 park 자세 확인 실패: 강제 토크 OFF를 중단합니다.')
     tasks.arm.gripper_torque_on()
-    tasks.arm.gripper_open(45)
+    tasks.arm.gripper_open(gripper_pct)
     time.sleep(.5)
     tasks.holding=False
     motors=list(tasks.arm.bus.motors)
@@ -575,7 +592,29 @@ def reset_arm_tasks(tasks, near_park):
             'pose':'park','torque_off':True}
 
 
-def run_arm_reset():
+
+def initialize_arm_tasks(tasks, park_module):
+    """Plan from measured joints before enabling torque; finish in park/OFF."""
+    if tasks.holding:
+        raise RuntimeError('초기화 전 블록 보유 상태를 확인하세요.')
+    if tasks.park_q is None:
+        raise RuntimeError('초기화용 park 자세가 없습니다.')
+    actual=tasks.arm.read_deg()
+    if not park_module.near_park(actual,tasks.park_q):
+        target=park_module.park_target(tasks.arm,tasks.park_q)
+        # This must succeed BEFORE torque-on, including when starting folded
+        # incorrectly with all motors off. Preserve the existing path checks.
+        park_module.plan(tasks.kin,actual,target)
+        tasks.arm.torque_on()  # Sets goals to measured positions first.
+        tasks._stop.clear()
+        tasks._goto_joint(target,'park')
+    # Normal initialization closes the empty gripper; failure recovery releases it.
+    result=reset_arm_tasks(tasks,park_module.near_park,gripper_pct=3)
+    result['cmd']='init'
+    return result
+
+
+def run_arm_reset(command='recover'):
     import contextlib
     import arm_cli
     from robot import devices as DEV, park as P
@@ -590,7 +629,8 @@ def run_arm_reset():
                 saved=arm_cli._load_state()
                 tasks.holding=bool(saved.get('holding'))
                 tasks.pose=saved.get('pose','unknown')
-                result=reset_arm_tasks(tasks,P.near_park)
+                result=(initialize_arm_tasks(tasks,P) if command=='init'
+                        else reset_arm_tasks(tasks,P.near_park))
                 arm_cli._save_state(tasks)
             return result
         finally:
@@ -1059,7 +1099,32 @@ class Mission:
                 raise LocalizationNotReady('자동 후진 중단: '+str(exc)) from exc
         raise LocalizationNotReady('자동 추가 후진 3회 후에도 거리 미달: 작업을 보류합니다.')
 
+    def camera_retry_pause(self):
+        self.stationary()
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            self.rclpy.spin_once(self.nav,timeout_sec=.1)
+
     def arm(self, command, color=None):
+        attempts=3 if command=='pick' else 1
+        for attempt in range(1,attempts+1):
+            try:
+                return self._arm_once(command,color,attempt)
+            except CameraStartupError as exc:
+                # A fresh process is the retry boundary: never reopen on top
+                # of a stuck daemon capture thread in the previous arm process.
+                if self.arm_process is not None:
+                    stop_group(self.arm_process,graces=(1,1,1))
+                    if self.arm_process.poll() is None:
+                        raise RuntimeError('이전 카메라 프로세스 종료 확인 실패') from exc
+                    self.arm_process=None
+                if attempt==attempts:
+                    raise RuntimeError(f'카메라 시작 {attempts}회 실패: {exc}') from exc
+                event('state',state='RETRYING_CAMERA',attempt=attempt+1,
+                      max_attempts=attempts,message=str(exc))
+                self.camera_retry_pause()
+
+    def _arm_once(self, command, color=None, attempt=1):
         # Convert cancellation into ArmStop INSIDE arm_cli.run. Its error path
         # holds torque and detaches, unlike an unhandled KeyboardInterrupt that
         # could enter the normal shutdown/park path. Do not modify arm_cli.py.
@@ -1072,18 +1137,30 @@ class Mission:
                   'from robot_mission import install_park_guard\n'
                   'install_park_guard(ArmTasks, P.near_park, ArmStop)\n'
                   'import arm_cli,sys,json\n'
-                  'if sys.argv[1] == "recover":\n'
+                  'if sys.argv[1] in ("recover","init"):\n'
                   '    from robot_mission import run_arm_reset\n'
-                  '    print(json.dumps(run_arm_reset()))\n'
+                  '    print(json.dumps(run_arm_reset(sys.argv[1])))\n'
                   'else:\n    arm_cli.main()\n')
+        if command=='pick' and self.config.get('camera_recovery'):
+            bridge=bridge.replace('else:\n    arm_cli.main()\n',
+                'else:\n'
+                '    from camera_recovery import prepare_camera,install_fast_capture\n'
+                '    from robot import devices as DEV\n'
+                '    from vision.camera import UsbCamera\n'
+                '    prepare_camera(DEV.WRIST_CAM,arm_cli.ROOT)\n'
+                '    install_fast_capture(UsbCamera)\n'
+                '    arm_cli.main()\n')
         argv = [self.config['arm_python'], '-u', '-c', bridge, command]
         if color:
             argv += ['--color', color]
-        path = self.log_root / ('arm-' + command + '.log')
+        suffix=f'-attempt-{attempt:02d}' if command=='pick' else ''
+        path = self.log_root / ('arm-' + command + suffix + '.log')
         with tempfile_output() as output, path.open('wb') as error:
             self.arm_process = subprocess.Popen(argv, cwd=Path(self.config['arm_cli']).parent,
                 stdin=subprocess.DEVNULL, stdout=output, stderr=error, start_new_session=True)
             deadline = time.monotonic() + self.config['arm_timeout']
+            camera_started=None
+            next_camera_check=0.
             while self.arm_process.poll() is None:
                 self.rclpy.spin_once(self.nav, timeout_sec=.1)
                 # Interrupt any arm command if fresh odometry reports base motion.
@@ -1093,24 +1170,36 @@ class Mission:
                         raise RuntimeError('팔 작업 중 베이스 움직임 감지')
                 elif self.odom is None or time.monotonic() - self.odom[1] > 2:
                     raise RuntimeError('팔 작업 중 오도메트리 수신 중단')
-                if time.monotonic() > deadline:
+                now=time.monotonic()
+                if command=='pick' and now>=next_camera_check:
+                    next_camera_check=now+.5
+                    capture_log=path.read_text(errors='replace')
+                    if ('[준비] 손목 카메라 여는 중' in capture_log and
+                            '[준비] 카메라 열림' not in capture_log):
+                        if camera_started is None:camera_started=now
+                        startup_error=('RuntimeError: 카메라' in capture_log)
+                        if startup_error or now-camera_started>12:
+                            raise CameraStartupError('카메라 시작 단계 응답 없음: '+str(path))
+                if now > deadline:
                     raise RuntimeError('팔 명령 시간 초과: ' + command)
             code = self.arm_process.returncode
             self.arm_process = None
             output.seek(0)
             result = last_json(output.read().decode(errors='replace'))
         event('arm_result', command=command, result=result)
+        if command=='pick' and camera_start_failed(result,path.read_text(errors='replace')):
+            raise CameraStartupError(str(result.get('error'))+' / '+str(path))
         if code or result.get('ok') is not True:
             raise RuntimeError(f'팔 {command} 실패: {result}')
         if command == 'pick' and (result.get('result') != 'picked' or
                 result.get('holding') is not True or result.get('pose') != 'carry'):
             raise RuntimeError('집기 성공·운반 자세 확인 실패')
-        expected = {'place': 'placed', 'park': 'parked', 'status': 'status','recover':'initialized'}
+        expected = {'place': 'placed', 'park': 'parked', 'status': 'status','recover':'initialized','init':'initialized'}
         if command in expected and result.get('result') != expected[command]:
             raise RuntimeError('예상과 다른 팔 결과: ' + str(result))
         if command == 'place' and (result.get('holding') is not False or result.get('pose') != 'park'):
             raise RuntimeError('내려놓기·팔 접기 결과 확인 실패: ' + str(result))
-        if command == 'recover' and (result.get('holding') is not False or
+        if command in ('recover','init') and (result.get('holding') is not False or
                 result.get('pose') != 'park' or result.get('torque_off') is not True):
             raise RuntimeError('팔 실패 복구·초기화 확인 실패: '+str(result))
         return result
@@ -1119,6 +1208,8 @@ class Mission:
         event('state',state='RECOVERING_ARM')
         if self.arm_process is not None:
             stop_group(self.arm_process,graces=(3,1,1))
+            if self.arm_process.poll() is None:
+                raise RuntimeError('팔 프로세스 종료 불가: 중복 연결 없이 종료합니다.')
             self.arm_process=None
         if self.moving:
             self.nav.cancelTask()
@@ -1146,7 +1237,8 @@ class Mission:
         status = self.arm('status')
         if status.get('holding'):
             raise RuntimeError('팔이 이미 블록을 보유 중입니다. 기존 작업을 먼저 확인하세요.')
-        self.arm('park')
+        event('state',state='INITIALIZING_ARM')
+        self.arm('init')
         if request.get('navigate_only'):
             self.navigate(request['destination'],'NAVIGATING_ONLY')
             event('state',state='DONE',mode='navigate_only')
