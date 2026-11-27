@@ -1,0 +1,17 @@
+{
+  "start_name": "homepoint",
+  "destination_name": "workbench",
+  "start": {
+    "frame_id": "map",
+    "x": 0.0,
+    "y": 0.0,
+    "yaw": 0.0
+  },
+  "destination": {
+    "frame_id": "map",
+    "x": -3.4,
+    "y": -0.47,
+    "yaw": -1.558
+  },
+  "color": "yellow"
+}

@@ -1,0 +1,19 @@
+bash: 터미털 프로세스 그룹(-1)을 설정할 수 없음: 장치에 대해 부적절한 ioctl
+bash: 이 셸에 작업 제어 없음
+[INFO] [1795673712.704761827] [rviz2]: Stereo is NOT SUPPORTED
+[INFO] [1795673712.704811228] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+[INFO] [1795673712.716078701] [rviz2]: Stereo is NOT SUPPORTED
+[INFO] [1795673733.615154499] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673728.572 for reason 'discarding message because the queue is full'
+[INFO] [1795673734.716146198] [rviz2]: Trying to create a map of size 133 x 38 using 1 swatches
+[ERROR] [1795673734.765862282] [rviz2]: Vertex Program:rviz/glsl120/indexed_8bit_image.vert Fragment Program:rviz/glsl120/indexed_8bit_image.frag GLSL link result : 
+active samplers with a different type refer to the same texture image unit
+[INFO] [1795673736.264638222] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673731.173 for reason 'discarding message because the queue is full'
+[ERROR] [1795673736.535656162] [rviz2]: Lookup would require extrapolation into the future.  Requested time 1795673736.556054 but the latest data is at time 1795673736.499763, when looking up transform from frame [base_scan] to frame [map]
+[INFO] [1795673758.824669585] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673758.698 for reason 'unknown'
+[INFO] [1795673773.915005181] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673731.671 for reason 'discarding message because the queue is full'
+[INFO] [1795673793.265095080] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673732.269 for reason 'discarding message because the queue is full'
+[INFO] [1795673886.765594774] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673734.463 for reason 'discarding message because the queue is full'
+[INFO] [1795673889.365621440] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673884.340 for reason 'discarding message because the queue is full'
+[INFO] [1795673891.965727800] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795673886.937 for reason 'discarding message because the queue is full'
+[INFO] [1795673893.187012106] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[ros2run]: Segmentation fault

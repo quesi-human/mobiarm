@@ -1,0 +1,14 @@
+설치 구성 참고(공식 문서/실제 장비 기준)
+ROS Humble Ubuntu Deb 설치:
+https://github.com/ros2/ros2_documentation/blob/humble/source/Installation/Ubuntu-Install-Debs.rst
+ROS apt 저장소 배포:
+https://github.com/ros-infrastructure/ros-apt-source
+TurtleBot3 SBC 설치:
+https://emanual.robotis.com/docs/en/platform/turtlebot3/sbc_setup/
+Servo SDK:
+https://pypi.org/project/feetech-servo-sdk/
+
+기존 2026-11-26 장비의 TurtleBot3/LDS-03 소스를 robot/ros_ws/source_snapshot.tar.gz로 보관.
+설치 대상 OS는 Ubuntu 22.04 amd64/arm64, ROS 2 Humble이다.
+현재 노트북·파이의 시스템 설치를 재사용하는 경로와 신규 소스 빌드 경로를 제공한다.
+이 장비에서 신규 OS 전체 설치를 수행하거나 로봇 동작을 시험하는 설치기는 아니다.

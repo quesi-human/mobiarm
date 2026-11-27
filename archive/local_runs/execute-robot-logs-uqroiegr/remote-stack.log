@@ -1,0 +1,17 @@
+bash: cannot set terminal process group (-1): Inappropriate ioctl for device
+bash: no job control in this shell
+@@ROBOT_EVENT@@{"event": "checked", "model": "waffle_pi", "domain": "36", "arm_colors": "['blue', 'green', 'orange', 'purple', 'red', 'yellow']"}
+@@ROBOT_EVENT@@{"event": "bringup_ready"}
+@@ROBOT_EVENT@@{"event": "initial_pose_sent", "pose": {"frame_id": "map", "x": 0.0, "y": 0.0, "yaw": 0.0}}
+@@ROBOT_EVENT@@{"event": "initial_pose_ready", "pose": {"frame_id": "map", "x": 0.0, "y": 0.0, "yaw": 0.0}}
+@@ROBOT_EVENT@@{"event": "ready", "logs": "/home/turtlebot6/so101-mobile-pick/mission_control/runs/20261126_140630_faf576bd/logs"}
+@@ROBOT_EVENT@@{"event": "state", "state": "LOCALIZING", "message": "RViz 2D Pose Estimate로 초기 위치를 지정하세요."}
+@@ROBOT_EVENT@@{"event": "state", "state": "PREPARING", "return_goal": {"frame_id": "map", "x": 0.0, "y": 0.0, "yaw": 0.0}}
+@@ROBOT_EVENT@@{"event": "arm_result", "command": "status", "result": {"ok": true, "cmd": "status", "result": "status", "holding": false, "pose": "park", "time": 1795669553.8106678}}
+@@ROBOT_EVENT@@{"event": "arm_result", "command": "park", "result": {"cmd": "park", "result": "parked", "note": "토크 꺼져 있음", "seconds": 0.0, "ok": true, "holding": false, "pose": "park"}}
+@@ROBOT_EVENT@@{"event": "state", "state": "NAVIGATING_TO_PICK", "goal": {"frame_id": "map", "x": -3.4, "y": -0.47, "yaw": -1.558}}
+@@ROBOT_EVENT@@{"event": "state", "state": "ERROR", "message": "Nav2 이동 실패: FAILED"}
+@@ROBOT_EVENT@@{"event": "error", "message": "Nav2 이동 실패: FAILED"}
+@@ROBOT_EVENT@@{"event": "error", "message": "노트북 제어 연결/heartbeat 종료"}
+@@ROBOT_EVENT@@{"event": "stack_stopped"}
+@@ROBOT_EVENT@@{"event": "error", "message": "노트북 제어 연결/heartbeat 종료"}

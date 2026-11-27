@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/tmp/tmpjz7r56if/rviz.py", line 4, in <module>
+    time.sleep(30)
+KeyboardInterrupt

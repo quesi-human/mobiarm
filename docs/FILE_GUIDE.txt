@@ -1,0 +1,30 @@
+자동 설치/실행 파일 안내
+
+setup.sh                     노트북·파이 자동 분할 설치 진입점
+install/setup.py             apt/venv/드라이버/SSH 배포/설치 확인 구현
+install/test_setup.py        설치 파일 보존·payload·안전 추출·경로 전달 테스트
+laptop/setup.sh              노트북 전용 설치
+robot/setup.sh               파이 전용 설치
+laptop/requirements.txt      노트북 Python 의존성
+robot/requirements.txt       소암/카메라 Python 의존성
+laptop/ros_packages.txt      노트북 apt 패키지 목록
+robot/ros_packages.txt       파이 apt 패키지 목록
+execute_robot.py            전용 .venv 및 installation/deployment.json 자동 적용
+installation/deployment.json 파이 설치 완료 후 생성되는 실제 접속/실행 경로
+laptop/setup_env.sh          설치 후 생성되는 노트북 ROS 환경
+
+controller/execute_robot.py  SSH·배포·RViz·CLI 작업 요청·프로세스 정리
+controller/robot_mission.py  파이 FSM·Nav2·접근/후진·팔 작업·안전 검사
+controller/scan_self_filter.py 몸체 내부 라이다 반사점 제거
+controller/onboard_navigation.launch.py 파이 headless Nav2 기동
+controller/pick_place.py     팔 단독 pick→place (원본 arm_cli 호출)
+controller/test_robot_mission.py  실제 ROS/하드웨어 없는 55개 테스트
+controller/*.yaml, *.pgm, *.rviz  현재 실행에 사용하는 지도·좌표·설정
+
+robot/so101-mobile-pick/     파이 소스/보정/이력 전체 보관본
+robot/ros_ws/source_snapshot.tar.gz LDS-03/TurtleBot3 빌드용 소스
+archive/                    이전 설정·실행 로그·정리 전 원본 스냅샷
+
+설치 payload에는 코드·보정값·드라이버 소스만 포함하며, 과거 state/runs/logs/Git는 제외한다.
+기존 보관본의 state는 당시 상태 기록이므로 새 설치 대상에 복사하지 않는다.
+기존 파이 ~/so101-mobile-pick와 ~/arm-venv는 자동 설치 대상으로 사용하지 않는다.

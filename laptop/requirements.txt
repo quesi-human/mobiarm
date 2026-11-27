@@ -1,0 +1,2 @@
+# Laptop CLI only. ROS Python modules are installed through apt, not pip.
+PyYAML>=5.4,<7

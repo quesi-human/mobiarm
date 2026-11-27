@@ -1,0 +1,321 @@
+FILE vision/camera.py
+"""카메라와 색 블록 검출 (vision/camera.py) — v1 robot/camera.py에서 고정 카메라 전용(밀림 보정·RealSense)을 뺀 것.
+
+    with UsbCamera("/dev/video0") as cam:      # 손목 카메라 (번호 또는 /dev/v4l/by-id/... 경로)
+        m, diag = cam.measure("red")           # 여러 프레임 중앙값 → m["pixel"]
+"""
+from pathlib import Path
+
+import numpy as np
+
+COLOR_RANGES = {   # v1과 같음 (HSV)
+    "red": [((0, 110, 70), (5, 255, 255)), ((175, 110, 70), (179, 255, 255))],
+    "orange": [((6, 100, 70), (15, 255, 255))],
+    "yellow": [((16, 80, 70), (34, 255, 255))],   # 11/24: 손목 카메라에서 노란 블록 색상값 21~27 → 25에서 잘려 못 찾았음
+    "green": [((36, 70, 50), (85, 255, 255))],
+    "blue": [((90, 80, 60), (125, 255, 255))],
+    "purple": [((120, 45, 45), (145, 255, 255))],
+}
+MIN_AREA = 250
+EDGE_PX = 3          # 윤곽이 화면 가장자리에 닿으면 블록이 잘린 것 → 중심이 틀어지므로 측정에 쓰지 않음
+MAX_AREA = 60000     # v2: 손목 카메라는 가까이서 보므로 블록이 크게 보임 (v1 위 카메라는 8000)
+MAX_ASPECT = 2.0     # 블록 모양 조건: 가늘고 긴 것(케이블), 울퉁불퉁한 것(손) 제외
+MIN_SOLIDITY = 0.80
+FRAME_OUTLIER_PX = 4.0   # 프레임별 중심이 다수와 이만큼 넘게 다르면 그 프레임은 버림
+
+
+def color_mask(bgr, color):
+    import cv2
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask = np.zeros(hsv.shape[:2], np.uint8)
+    for lo, hi in COLOR_RANGES[color]:
+        mask |= cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+    k = np.ones((5, 5), np.uint8)
+    return cv2.morphologyEx(cv2.morphologyEx(mask, cv2.MORPH_OPEN, k), cv2.MORPH_CLOSE, k)
+
+
+def detect_2d(bgr, color, min_area=MIN_AREA):
+    """색 영역 윤곽 → 중심 픽셀, 면적, 화면 가장자리 접촉 여부."""
+    import cv2
+    mask = color_mask(bgr, color)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    H, W = mask.shape
+    out = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area or area > MAX_AREA:
+            continue
+        (_, (w0, h0), _) = cv2.minAreaRect(c)                 # 회전된 사각형 기준 (대각선 케이블도 걸러짐)
+        if max(w0, h0) / max(1.0, min(w0, h0)) > MAX_ASPECT:
+            continue
+        if area / max(cv2.contourArea(cv2.convexHull(c)), 1.0) < MIN_SOLIDITY:
+            continue
+        mom = cv2.moments(c)
+        if mom["m00"] == 0:
+            continue
+        u, v = mom["m10"] / mom["m00"], mom["m01"] / mom["m00"]
+        bx, by, bw, bh = cv2.boundingRect(c)
+        edge = bx <= EDGE_PX or by <= EDGE_PX or bx + bw >= W - EDGE_PX or by + bh >= H - EDGE_PX
+        out.append({"pixel": (float(u), float(v)), "camera_xyz_m": None, "area": float(area),
+                    "contour": c, "touches_edge": bool(edge), "_mask": mask})
+    return out
+
+
+
+class UsbCamera:
+    """일반 USB(UVC) 카메라. v1 TopCamera와 같은 설정 (MJPG 640×480)."""
+    kind = "usb"
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *a):
+        self.stop()
+
+    def __init__(self, index=0, width=640, height=480, fps=30, fourcc="MJPG"):
+        self.index, self.size, self.fourcc = index, (width, height, fps), fourcc
+        self.cap = None
+
+    def start(self, timeout_s=10.0):
+        """카메라 열기. 11/26 파이: 드라이버 안에서 멈춰 Ctrl+C도 안 먹는 일이 있어 별도 스레드로 열고 timeout_s 넘으면 포기."""
+        import threading
+        box = {}
+
+        def worker():
+            try:
+                box["ok"] = self._start()
+            except Exception as e:
+                box["err"] = e
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout_s)
+        if t.is_alive():
+            raise RuntimeError(f"카메라 {self.index}가 {timeout_s:.0f}초 동안 응답 없음 — USB 다시 꽂기, "
+                               "`v4l2-ctl --list-devices`, `sudo dmesg | tail` 확인")
+        if "err" in box:
+            raise box["err"]
+        return self
+
+    def _start(self):
+        import os
+        import re
+        import cv2
+        # 11/25 파이: pip판 OpenCV는 /dev/v4l/by-id/... 이름으로 V4L2를 못 엶("can't be used to capture by name") →
+        #   다른 백엔드(FFMPEG)로 넘어가 한참 멈춤. 그래서 실제 장치(/dev/videoN)를 찾아 '번호'로 V4L2만 씀.
+        src = str(self.index)
+        real = os.path.realpath(src) if src.startswith("/") else src
+        m = re.fullmatch(r"(?:/dev/video)?(\d+)", real)
+        if not m:
+            raise RuntimeError(f"카메라 경로를 이해할 수 없음: {self.index} → {real}")
+        self.cap = cv2.VideoCapture(f"/dev/video{m.group(1)}", cv2.CAP_V4L2)   # cam_check와 같은 방식 (파이에서 동작 확인)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"카메라  {self.index}를 열 수 없음 (다른 프로그램이 쓰는 중이거나 번호가 다름)")
+        w, h, fps = self.size
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        # 11/26: FPS는 따로 설정하지 않음 — 파이에서 UVC probe 시간 초과(-110)가 날 때가 있어 cam_check와 같게 (기본 30fps)
+        import time
+        t0, got = time.monotonic(), 0
+        while got < 30 and time.monotonic() - t0 < 5.0:      # 자동 노출 안정화 (영상이 안 오면 5초에서 멈춤)
+            ok, _ = self.cap.read()
+            got += bool(ok)
+        if got == 0:
+            self.cap.release()
+            self.cap = None
+            raise RuntimeError(f"카메라 {self.index}(→ /dev/video{m.group(1)})에서 영상이 안 옴 — 다른 프로그램이 쓰는 중인지 확인")
+        return self
+
+    def stop(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+    def frame(self):
+        for _ in range(2):                        # 버퍼에 남은 오래된 프레임 버리기
+            self.cap.grab()
+        ok, bgr = self.cap.read()
+        if not ok:
+            raise RuntimeError("카메라 프레임 읽기 실패")
+        return (bgr,)
+
+    def find(self, frame, color):
+        return detect_2d(frame[0], color)
+
+
+
+    def snapshot(self, path):
+        import cv2
+        img = self.frame()[0]
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), img)
+        return img
+
+    def measure(self, color, n_frames=8, expect=1, save_image=None, keep_fn=None):
+        """n_frames 동안 검출이 정확히 expect개(가장자리 접촉 없음)인 프레임만 모아 중앙값."""
+        px, counts, last = [], {}, None
+        for _ in range(n_frames):
+            fr = self.frame()
+            dets = [d for d in self.find(fr, color) if not d["touches_edge"]]
+            if keep_fn is not None:
+                dets = [d for d in dets if keep_fn(d)]          # 11/25: 픽셀만이 아니라 검출 전체(윤곽 포함)를 넘김
+            last = (fr[0], dets)
+            counts[len(dets)] = counts.get(len(dets), 0) + 1
+            if len(dets) == expect:
+                px.append([d["pixel"] for d in dets])
+        if save_image and last is not None:
+            import cv2
+            img = last[0].copy()
+            for d in last[1]:
+                cv2.drawContours(img, [d["contour"]], -1, (255, 255, 255), 2)
+                cv2.circle(img, tuple(int(a) for a in d["pixel"]), 4, (255, 255, 255), -1)
+            Path(save_image).parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(save_image), img)
+        diag = {"detections_per_frame": counts, "frames_used": len(px)}
+        if len(px) < max(3, n_frames // 3):
+            return None, diag
+        if expect != 1:
+            return [{"pixel": list(p)} for p in px[-1]], diag
+        p = np.array(px)[:, 0, :]
+        keep = np.linalg.norm(p - np.median(p, axis=0), axis=1) <= FRAME_OUTLIER_PX
+        if keep.sum() < max(3, n_frames // 3):
+            diag["error"] = "프레임마다 검출 위치가 크게 달라짐 (손이나 다른 물체가 섞임)"
+            return None, diag
+        p = p[keep]
+        diag["spread_px"] = float(np.max(np.ptp(p, axis=0)))
+        contour = last[1][0]["contour"] if last and len(last[1]) == 1 else None
+        return {"pixel": np.median(p, axis=0).tolist(), "contour": contour}, diag
+
+FILE robot/devices.py
+"""팔 USB 포트·손목 카메라 기본 경로.
+
+번호(/dev/ttyACM0, /dev/video0)는 꽂는 순서에 따라 바뀜 — 특히 터틀봇 라즈베리파이에선 OpenCR 보드가
+ttyACM0을, 파이 카메라가 video0을 먼저 차지할 수 있음. 그래서 장치 고유 이름(/dev/.../by-id/...)을 기본으로 쓰고,
+그 이름이 없으면 카메라는 이름(Innomaker)으로 /sys에서 찾고, 그래도 없으면 예전 번호로 돌아감. 환경변수 SO101_PORT / SO101_CAM 으로 바꿀 수 있음.
+11/25 노트북에서 확인한 이름.
+"""
+import os
+from pathlib import Path
+
+ARM_PORT_BY_ID = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B14030716-if00"
+WRIST_CAM_BY_ID = "/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-720P_SN0001-video-index0"
+
+
+def _pick(env, by_id, fallback):
+    if os.environ.get(env):
+        return os.environ[env]
+    return by_id if Path(by_id).exists() else fallback
+
+
+def _find_cam_by_name(word="Innomaker"):
+    """/dev/v4l/by-id가 없는 시스템(11/25 터틀봇 라즈베리파이)용: 장치 이름에 word가 들어간 카메라의 영상 장치(index 0)."""
+    for d in sorted(Path("/sys/class/video4linux").glob("video*"), key=lambda p: int(p.name[5:] or 0)):
+        try:
+            name = (d / "name").read_text().strip()
+            index = int((d / "index").read_text().strip()) if (d / "index").exists() else 0
+        except (OSError, ValueError):
+            continue
+        if word.lower() in name.lower() and index == 0:
+            return f"/dev/{d.name}"
+    return None
+
+
+ARM_PORT = _pick("SO101_PORT", ARM_PORT_BY_ID, "/dev/ttyACM0")
+WRIST_CAM = _pick("SO101_CAM", WRIST_CAM_BY_ID, _find_cam_by_name() or "/dev/video0")
+
+CAMERA LINKS
+/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-720P_SN0001-video-index0 /dev/video0 True
+/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-720P_SN0001-video-index1 /dev/video1 True
+COMMAND ['v4l2-ctl', '--list-devices']
+bcm2835-codec-decode (platform:bcm2835-codec):
+	/dev/video10
+	/dev/video11
+	/dev/video12
+	/dev/video18
+	/dev/video31
+	/dev/media3
+
+bcm2835-isp (platform:bcm2835-isp):
+	/dev/video13
+	/dev/video14
+	/dev/video15
+	/dev/video16
+	/dev/video20
+	/dev/video21
+	/dev/video22
+	/dev/video23
+	/dev/media1
+	/dev/media2
+
+mmal service 16.1 (platform:bcm2835-v4l2-0):
+	/dev/video2
+
+Innomaker-U20CAM-720P  : Innoma (usb-0000:01:00.0-1.1):
+	/dev/video0
+	/dev/video1
+	/dev/media0
+
+
+COMMAND ['fuser', '-v', '/dev/video0', '/dev/video1', '/dev/video2', '/dev/video3']
+Specified filename /dev/video3 does not exist.
+
+COMMAND ['lsusb']
+Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 001 Device 006: ID 10c4:ea60 Silicon Labs CP210x UART Bridge
+Bus 001 Device 005: ID 0483:5740 STMicroelectronics Virtual COM Port
+Bus 001 Device 004: ID 1a86:55d3 QinHeng Electronics USB Single Serial
+Bus 001 Device 003: ID 0c45:6367 Microdia Innomaker-U20CAM-720P  
+Bus 001 Device 002: ID 2109:3431 VIA Labs, Inc. Hub
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+
+COMMAND ['journalctl', '-k', '--since', '15 minutes ago', '--no-pager', '-n', '60']
+Nov 26 07:26:25 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:26:30 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:26:35 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:26:40 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:26:45 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:26:50 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:26:56 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:01 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:06 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:11 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:16 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:21 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:26 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:31 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:37 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:42 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:47 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:52 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:27:57 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:28:02 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:28:07 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:28:12 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:28:52 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:28:58 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:29:13 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:29:13 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:29:19 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:29:34 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:29:34 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:33:06 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:33:11 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:34:43 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:34:48 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:35:04 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:35:04 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:35:09 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:35:25 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:35:25 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:38:57 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:39:02 ubuntu kernel: uvcvideo 1-1.1:1.1: Failed to set UVC probe control : -110 (exp. 26).
+Nov 26 07:39:23 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:39:28 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:39:44 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:39:44 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+Nov 26 07:39:49 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:40:05 ubuntu kernel: usb 1-1.1: device descriptor read/64, error -110
+Nov 26 07:40:05 ubuntu kernel: usb 1-1.1: reset high-speed USB device number 3 using xhci_hcd
+

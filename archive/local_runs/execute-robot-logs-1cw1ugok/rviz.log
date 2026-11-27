@@ -1,0 +1,16 @@
+bash: 터미털 프로세스 그룹(-1)을 설정할 수 없음: 장치에 대해 부적절한 ioctl
+bash: 이 셸에 작업 제어 없음
+[INFO] [1795661985.368517251] [rviz2]: Stereo is NOT SUPPORTED
+[INFO] [1795661985.368578063] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+[INFO] [1795661985.379533344] [rviz2]: Stereo is NOT SUPPORTED
+[ERROR] [1795661985.571022274] [rviz2]: PluginlibFactory: The plugin for class 'nav2_rviz_plugins/Selector' failed to load. Error: According to the loaded plugin descriptions the class nav2_rviz_plugins/Selector with base class type rviz_common::Panel does not exist. Declared types are  nav2_rviz_plugins/Navigation 2 slam_toolbox::SlamToolboxPlugin
+[ERROR] [1795661985.571398388] [rviz2]: PluginlibFactory: The plugin for class 'nav2_rviz_plugins/Docking' failed to load. Error: According to the loaded plugin descriptions the class nav2_rviz_plugins/Docking with base class type rviz_common::Panel does not exist. Declared types are  nav2_rviz_plugins/Navigation 2 slam_toolbox::SlamToolboxPlugin
+[INFO] [1795661986.551367530] [rviz2]: Trying to create a map of size 60 x 60 using 1 swatches
+[ERROR] [1795661986.583507786] [rviz2]: Vertex Program:rviz/glsl120/indexed_8bit_image.vert Fragment Program:rviz/glsl120/indexed_8bit_image.frag GLSL link result : 
+active samplers with a different type refer to the same texture image unit
+[INFO] [1795661986.679475274] [rviz2]: Trying to create a map of size 133 x 38 using 1 swatches
+[INFO] [1795661986.712066582] [rviz2]: Trying to create a map of size 133 x 38 using 1 swatches
+[INFO] [1795661986.966287760] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795661985.892 for reason 'discarding message because the queue is full'
+[ERROR] [1795661988.953127886] [rviz2]: Lookup would require extrapolation into the future.  Requested time 1795661988.887658 but the latest data is at time 1795661988.853189, when looking up transform from frame [base_scan] to frame [map]
+[INFO] [1795661993.279345861] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[ros2run]: Segmentation fault

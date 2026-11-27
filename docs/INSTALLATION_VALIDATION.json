@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-26",
+  "timezone": "Asia/Seoul",
+  "controller_tests": 55,
+  "installer_tests": 5,
+  "laptop_install_completed": true,
+  "robot_install_completed": true,
+  "existing_system_ros_reused": true,
+  "robot_nodes_started": false,
+  "arm_or_camera_opened": false,
+  "original_desktop_files_hash_verified": 21,
+  "fresh_os_driver_build_tested": false,
+  "robot_prefix": "/home/turtlebot6/pjt_soarm_turtlebot",
+  "new_path_check_passed": true
+}

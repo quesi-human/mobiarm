@@ -1,0 +1,107 @@
+[
+  {
+    "source": "/home/ssafy/Desktop/execute_robot.py",
+    "copy": "controller/execute_robot.py",
+    "sha256": "53d8c3a7f71f2de3f8b1778ecea234e5b12ce0e044044439892c81475524b689"
+  },
+  {
+    "source": "/home/ssafy/Desktop/robot_mission.py",
+    "copy": "controller/robot_mission.py",
+    "sha256": "0859cc0b0016bc40f23357d783e19b8e148a58a560e8eceec23874208703adf3"
+  },
+  {
+    "source": "/home/ssafy/Desktop/scan_self_filter.py",
+    "copy": "controller/scan_self_filter.py",
+    "sha256": "1967fb78ab0ed5bd8389818b202440f130639d62e165c57729d9a990a0654939"
+  },
+  {
+    "source": "/home/ssafy/Desktop/pick_place.py",
+    "copy": "controller/pick_place.py",
+    "sha256": "b335266d632d849e638f37b3d1b36501814139b098100a4296df7a17a48a0a84"
+  },
+  {
+    "source": "/home/ssafy/Desktop/onboard_navigation.launch.py",
+    "copy": "controller/onboard_navigation.launch.py",
+    "sha256": "e2719e65140724b0e9281436420ad340828949f2a07445904deae44d72d6daa5"
+  },
+  {
+    "source": "/home/ssafy/Desktop/nav2_mobile_pick.yaml",
+    "copy": "controller/nav2_mobile_pick.yaml",
+    "sha256": "a8731b7be50e4a666d8c981b8e6a56789e07e9968f2ee7a3ab26fcbaacc1f517"
+  },
+  {
+    "source": "/home/ssafy/Desktop/waypoints.yaml",
+    "copy": "controller/waypoints.yaml",
+    "sha256": "4a332fc23b5332f9ee71f84863753bf7a65cb496e79f4af2bddea095d8bec9af"
+  },
+  {
+    "source": "/home/ssafy/Desktop/clear_map.yaml",
+    "copy": "controller/clear_map.yaml",
+    "sha256": "e49e5923c1457c733143074753ed7264bcf4a19389f7c2151d6cb140da1ed855"
+  },
+  {
+    "source": "/home/ssafy/Desktop/clear_map_updata.pgm",
+    "copy": "controller/clear_map_updata.pgm",
+    "sha256": "dd17ef67d1ce2f34c5c99d3be7ca8e00a7b587cce496aaf4741401c6bab302ba"
+  },
+  {
+    "source": "/home/ssafy/Desktop/mobile_pick.rviz",
+    "copy": "controller/mobile_pick.rviz",
+    "sha256": "4c1fcb20a505195a87c900466fa537c2df30afc7bbdba48f4afa674f6a22becc"
+  },
+  {
+    "source": "/home/ssafy/Desktop/test_robot_mission.py",
+    "copy": "controller/test_robot_mission.py",
+    "sha256": "3104159eb862ee7b435df403f6d9433bfad7d34c814191cf167b8bfc11cc9761"
+  },
+  {
+    "source": "/home/ssafy/Desktop/nav2_mobile_pick_rectangle_backup.yaml",
+    "copy": "controller/nav2_mobile_pick_rectangle_backup.yaml",
+    "sha256": "34e5224f03159a2ca8f4825130fce3d4b53c1374bfe409375324ad2d42c39bdf"
+  },
+  {
+    "source": "/home/ssafy/Desktop/execute_robot_README.txt",
+    "copy": "archive/desktop_history/execute_robot_README.txt",
+    "sha256": "176f47100d0bcd4f232adbd6c952782fd29b6f52293fc91d3c30b5f3d34b37bf"
+  },
+  {
+    "source": "/home/ssafy/Desktop/clear_map_updata.xcf",
+    "copy": "archive/desktop_history/clear_map_updata.xcf",
+    "sha256": "79fa117a1fd4148265bd6fe15f7edbad0f36192e83249ad7996088c283d5ecc0"
+  },
+  {
+    "source": "/home/ssafy/Desktop/global_costmap_debug.yaml",
+    "copy": "archive/desktop_history/global_costmap_debug.yaml",
+    "sha256": "cac736354303c0f334e76134de84b2f93a3dd05417f8f18c6b40f5b9aa7893b9"
+  },
+  {
+    "source": "/home/ssafy/Desktop/waypoints_move.py",
+    "copy": "archive/desktop_history/waypoints_move.py",
+    "sha256": "8aeb3ed46b3955272a131dfcfc6d1c33dd07578696dbec7d021fb62358a01c7f"
+  },
+  {
+    "source": "/home/ssafy/Desktop/go_waypoint.py",
+    "copy": "archive/desktop_history/go_waypoint.py",
+    "sha256": "52155b91579bc8671fd8c31f9d86fa048924b87d4d955d767976ae5324396fcf"
+  },
+  {
+    "source": "/home/ssafy/Desktop/waypoints_follower.py",
+    "copy": "archive/desktop_history/waypoints_follower.py",
+    "sha256": "651fa7000523ff4b3d8afe1efad41285e79053a98ebb27b5cfc51e5ab4045236"
+  },
+  {
+    "source": "/home/ssafy/Desktop/nav2_mobile_pick_dwb_backup.yaml",
+    "copy": "archive/desktop_history/nav2_mobile_pick_dwb_backup.yaml",
+    "sha256": "de628a2312844a59962819d56884746bd6ef26f2935b778d80a7769f9025e387"
+  },
+  {
+    "source": "/home/ssafy/Desktop/nav2_mobile_pick_before_progress_tuning.yaml",
+    "copy": "archive/desktop_history/nav2_mobile_pick_before_progress_tuning.yaml",
+    "sha256": "5cc1f09fe5fe3c3679fb6d1bf3d43311d9e10406a719fc11796671e9c0940cef"
+  },
+  {
+    "source": "/home/ssafy/Desktop/execute_robot_before_onboard.py",
+    "copy": "archive/desktop_history/execute_robot_before_onboard.py",
+    "sha256": "62bed2b642baab2b2c0a2e6a50e08ce8b80334bfedfb2ad9aa3e5948a845ff8e"
+  }
+]

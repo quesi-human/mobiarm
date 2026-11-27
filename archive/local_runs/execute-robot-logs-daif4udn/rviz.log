@@ -1,0 +1,30 @@
+bash: 터미털 프로세스 그룹(-1)을 설정할 수 없음: 장치에 대해 부적절한 ioctl
+bash: 이 셸에 작업 제어 없음
+[INFO] [1795662199.084881547] [rviz2]: Stereo is NOT SUPPORTED
+[INFO] [1795662199.084944605] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+[INFO] [1795662199.097698147] [rviz2]: Stereo is NOT SUPPORTED
+[ERROR] [1795662199.218580056] [rviz2]: PluginlibFactory: The plugin for class 'nav2_rviz_plugins/Selector' failed to load. Error: According to the loaded plugin descriptions the class nav2_rviz_plugins/Selector with base class type rviz_common::Panel does not exist. Declared types are  nav2_rviz_plugins/Navigation 2 slam_toolbox::SlamToolboxPlugin
+[ERROR] [1795662199.218953210] [rviz2]: PluginlibFactory: The plugin for class 'nav2_rviz_plugins/Docking' failed to load. Error: According to the loaded plugin descriptions the class nav2_rviz_plugins/Docking with base class type rviz_common::Panel does not exist. Declared types are  nav2_rviz_plugins/Navigation 2 slam_toolbox::SlamToolboxPlugin
+[INFO] [1795662199.583179573] [rviz2]: Trying to create a map of size 29 x 29 using 1 swatches
+[ERROR] [1795662199.615435826] [rviz2]: Vertex Program:rviz/glsl120/indexed_8bit_image.vert Fragment Program:rviz/glsl120/indexed_8bit_image.frag GLSL link result : 
+active samplers with a different type refer to the same texture image unit
+[ERROR] [1795662199.697759967] [rviz2]: Lookup would require extrapolation into the future.  Requested time 1795662199.593228 but the latest data is at time 1795662199.574900, when looking up transform from frame [base_scan] to frame [map]
+[INFO] [1795662204.030154265] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795662202.591 for reason 'discarding message because the queue is full'
+[INFO] [1795662208.319192413] [rviz2]: Trying to create a map of size 133 x 38 using 1 swatches
+[INFO] [1795662210.815098713] [rviz2]: Trying to create a map of size 60 x 60 using 1 swatches
+[INFO] [1795662212.095856736] [rviz2]: Trying to create a map of size 29 x 29 using 1 swatches
+[INFO] [1795662212.127202598] [rviz2]: Trying to create a map of size 29 x 29 using 1 swatches
+[INFO] [1795662215.966857726] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795662214.881 for reason 'discarding message because the queue is full'
+[INFO] [1795662219.294771950] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795662218.077 for reason 'discarding message because the queue is full'
+[INFO] [1795662227.999524644] [rviz2]: Trying to create a map of size 133 x 38 using 1 swatches
+[INFO] [1795662229.087565242] [rviz2]: Trying to create a map of size 133 x 38 using 1 swatches
+[INFO] [1795662230.462462332] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795662229.358 for reason 'discarding message because the queue is full'
+[INFO] [1795662231.967615375] [rviz2]: Trying to create a map of size 29 x 29 using 1 swatches
+[INFO] [1795662232.990968013] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795662231.753 for reason 'discarding message because the queue is full'
+[INFO] [1795662246.079658668] [rviz2]: Trying to create a map of size 29 x 29 using 1 swatches
+[INFO] [1795662344.510560687] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795662343.282 for reason 'discarding message because the queue is full'
+[INFO] [1795662346.527328527] [rviz2]: Trying to create a map of size 133 x 38 using 1 swatches
+[INFO] [1795662346.976282889] [rviz2]: Trying to create a map of size 29 x 29 using 1 swatches
+[INFO] [1795662349.534552182] [rviz]: Message Filter dropping message: frame 'base_scan' at time 1795662347.766 for reason 'discarding message because the queue is full'
+[INFO] [1795662368.970063396] [rclcpp]: signal_handler(SIGINT/SIGTERM)
+[ros2run]: Segmentation fault
